@@ -1,0 +1,212 @@
+import { ResolvedCommand, OS, AIProvider } from "../types";
+import * as fs from "fs-extra";
+import * as path from "path";
+import * as os from "os";
+
+export class AIService {
+  private configPath: string;
+
+  constructor() {
+    this.configPath = path.join(os.homedir(), ".ai-cli", "config.json");
+  }
+
+  async generateCommand(
+    input: string,
+    osInfo: OS
+  ): Promise<ResolvedCommand | null> {
+    try {
+      const provider = await this.getAvailableProvider();
+      if (!provider) return null;
+
+      const wantsMultiple =
+        /\bthen\b|\band\b|\bafter that\b|\bfollowed by\b/i.test(input);
+
+      const prompt = this.buildPrompt(input, osInfo, wantsMultiple);
+      const response = await this.callAI(provider, prompt);
+
+      if (!response) return null;
+
+      const parsed = this.parseAIResponse(response, wantsMultiple);
+      return parsed;
+    } catch (error: any) {
+      console.error("AI service error:", error.message);
+      return null;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Provider selection                                                   */
+  /* ------------------------------------------------------------------ */
+
+  private async getAvailableProvider(): Promise<AIProvider | null> {
+    const geminiKey = process.env.GEMINI_API_KEY;
+
+    if (geminiKey) {
+      return {
+        name: "gemini",
+        apiKey: geminiKey,
+        endpoint:
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        maxTokens: 256,
+      };
+    }
+
+    if (await fs.pathExists(this.configPath)) {
+      const config = await fs.readJson(this.configPath);
+      if (config.ai?.apiKey && config.ai?.name === "gemini") {
+        return config.ai;
+      }
+    }
+
+    return null;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Prompt                                                              */
+  /* ------------------------------------------------------------------ */
+
+  private buildPrompt(
+    input: string,
+    osInfo: OS,
+    wantsMultiple: boolean
+  ): string {
+    const osContext =
+      osInfo.platform === "windows"
+        ? "Windows PowerShell"
+        : osInfo.platform === "linux"
+        ? "Linux Bash"
+        : "macOS Zsh";
+
+    const chainingRule = wantsMultiple
+      ? "- You MUST combine ALL steps into ONE command using && or ;"
+      : "- Return the single most appropriate command";
+
+    return `
+You are a shell command generator.
+
+User request:
+"${input}"
+
+Target environment:
+${osContext}
+
+STRICT RULES:
+- Output ONLY a valid shell command
+- NO explanations
+- NO greetings
+- NO markdown
+- NO quotes
+- NO placeholders like command1
+- NO sentences
+${chainingRule}
+- Prefer PowerShell-safe syntax on Windows
+
+If there are 2 or more commands to achieve the user's goal, you MUST combine them into a single line using && or ;. If you cannot determine a clear command, return only one command.
+`.trim();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* AI Call                                                             */
+  /* ------------------------------------------------------------------ */
+
+  private async callAI(
+    provider: AIProvider,
+    prompt: string
+  ): Promise<string | null> {
+    if (provider.name !== "gemini") return null;
+
+    try {
+      const response = await fetch(
+        `${provider.endpoint}?key=${provider.apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: "user",
+                parts: [{ text: prompt }],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.2,
+              maxOutputTokens: provider.maxTokens ?? 256,
+            },
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Gemini API error: ${response.status} ${response.statusText}`
+        );
+      }
+
+      const data = await response.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null;
+    } catch (error: any) {
+      console.error("Gemini API call failed:", error.message);
+      return null;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Response Parsing                                                     */
+  /* ------------------------------------------------------------------ */
+
+  private parseAIResponse(
+    response: string,
+    wantsMultiple: boolean
+  ): ResolvedCommand | null {
+    const raw = response.trim();
+
+    // Remove code fences / markdown
+    const cleaned = raw
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/`/g, "")
+      .split("\n")[0]
+      .trim();
+
+    /* ---------------- HARD REJECTIONS ---------------- */
+
+    if (
+      !cleaned ||
+      cleaned.length > 180 ||
+      cleaned.includes("{") ||
+      cleaned.includes("}") ||
+      cleaned.includes("command1") ||
+      cleaned.includes("command2") ||
+      cleaned.endsWith("?") ||
+      cleaned.toLowerCase().includes("help") ||
+      cleaned.toLowerCase().includes("ready")
+    ) {
+      return null;
+    }
+
+    // Reject sentences
+    if (cleaned.split(" ").length > 10 && !/[;&|]/.test(cleaned)) {
+      return null;
+    }
+
+    // If multiple steps were requested, enforce chaining
+    if (wantsMultiple && !/[;&|]{1,2}/.test(cleaned)) {
+      return null;
+    }
+
+    /* ---------------- ACCEPT ---------------- */
+
+    return {
+      command: cleaned,
+      explanation: "Command suggested by AI",
+      tags: ["ai"],
+      confidence: wantsMultiple ? 0.75 : 0.6,
+      source: "ai",
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+
+  isConfigured(): boolean {
+    return !!(process.env.GEMINI_API_KEY || fs.pathExistsSync(this.configPath));
+  }
+}

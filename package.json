@@ -1,0 +1,60 @@
+{
+  "name": "ai-cli-assistant",
+  "version": "1.0.0",
+  "description": "Cross-platform CLI assistant that integrates with existing terminals",
+  "main": "dist/index.js",
+  "bin": {
+    "ai": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "jest",
+    "lint": "eslint src/**/*.ts",
+    "install-global": "npm run build && npm install -g .",
+    "uninstall-global": "npm uninstall -g ai-cli-assistant"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "assistant",
+    "terminal",
+    "shell",
+    "cross-platform"
+  ],
+  "author": "AI CLI Assistant",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "dotenv": "^17.2.4",
+    "fs-extra": "^11.3.3",
+    "inquirer": "^8.2.7",
+    "node-fetch": "^3.3.2",
+    "os-name": "^5.1.0",
+    "which": "^4.0.0",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^20.10.0",
+    "@types/which": "^3.0.3",
+    "@typescript-eslint/eslint-plugin": "^6.13.2",
+    "@typescript-eslint/parser": "^6.13.2",
+    "eslint": "^8.55.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "files": [
+    "dist/**/*",
+    "scripts/**/*",
+    "README.md"
+  ]
+}
