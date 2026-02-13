@@ -14,6 +14,7 @@ export class CommandResolver {
 
   async resolve(input: string, os: OS): Promise<ResolvedCommand | null> {
     const normalizedInput = input.toLowerCase().trim();
+    const wantsMultiple = /\bthen\b|\band\b|\bafter that\b|\bfollowed by\b/i.test(input);
 
     // Priority 1: Check command vault first
     const vaultResult = await this.searchVault(normalizedInput);
@@ -21,15 +22,22 @@ export class CommandResolver {
       return { ...vaultResult, source: 'vault' };
     }
 
-    // Priority 2: Apply rule-based mappings
-    const ruleResult = this.applyRules(normalizedInput, os);
-    if (ruleResult) {
-      return { ...ruleResult, source: 'rule' };
+    if (wantsMultiple) {
+      // Priority 2: Use AI for multi-step requests
+      const aiResult = await this.aiService.generateCommand(input, os);
+      if (aiResult) {
+        return { ...aiResult, source: 'ai' };
+      }
+    } else {
+      // Priority 2: Apply rule-based mappings for single commands
+      const ruleResult = this.applyRules(normalizedInput, os);
+      if (ruleResult) {
+        return { ...ruleResult, source: 'rule' };
+      }
     }
 
     // Priority 3: Use AI fallback
     const aiResult = await this.aiService.generateCommand(input, os);
-    console.log('[AI RESULT]', aiResult);
     if (aiResult) {
       return { ...aiResult, source: 'ai' };
     }
@@ -43,7 +51,7 @@ export class CommandResolver {
       if (commands.length > 0) {
         const bestMatch = commands[0]; // Assumes storage sorts by relevance
         return {
-          command: bestMatch.command,
+          commands: [bestMatch.command],
           explanation: bestMatch.description,
           tags: bestMatch.tags,
           confidence: bestMatch.confidence,
@@ -61,7 +69,7 @@ export class CommandResolver {
     if (input.includes('list files') || input.includes('show files') || input.includes('ls')) {
       const command = os.platform === 'windows' ? 'dir' : 'ls -la';
       return {
-        command,
+        commands: [command],
         explanation: `List all files and directories with details`,
         tags: ['filesystem', 'list'],
         confidence: 0.9,
@@ -72,7 +80,7 @@ export class CommandResolver {
     if (input.includes('create folder') || input.includes('make directory') || input.includes('mkdir')) {
       const command = os.platform === 'windows' ? 'mkdir' : 'mkdir -p';
       return {
-        command,
+        commands: [command],
         explanation: `Create a new directory (parent directories created as needed)`,
         tags: ['filesystem', 'create'],
         confidence: 0.9,
@@ -83,7 +91,7 @@ export class CommandResolver {
     if (input.includes('remove file') || input.includes('delete file') || input.includes('rm file')) {
       const command = os.platform === 'windows' ? 'del' : 'rm';
       return {
-        command,
+        commands: [command],
         explanation: `Remove a file`,
         tags: ['filesystem', 'delete'],
         confidence: 0.8,
@@ -94,7 +102,7 @@ export class CommandResolver {
     if (input.includes('remove folder') || input.includes('delete directory') || input.includes('rmdir')) {
       const command = os.platform === 'windows' ? 'rmdir /s' : 'rm -rf';
       return {
-        command,
+        commands: [command],
         explanation: `Remove a directory and all its contents recursively`,
         tags: ['filesystem', 'delete'],
         confidence: 0.8,
@@ -106,7 +114,7 @@ export class CommandResolver {
     if (input.includes('show processes') || input.includes('list processes') || input.includes('ps')) {
       const command = os.platform === 'windows' ? 'tasklist' : 'ps aux';
       return {
-        command,
+        commands: [command],
         explanation: `Show all running processes`,
         tags: ['process', 'list'],
         confidence: 0.9,
@@ -117,7 +125,7 @@ export class CommandResolver {
     if (input.includes('kill process') || input.includes('stop process')) {
       const command = os.platform === 'windows' ? 'taskkill /PID' : 'kill -9';
       return {
-        command,
+        commands: [command],
         explanation: `Terminate a process by PID`,
         tags: ['process', 'kill'],
         confidence: 0.8,
@@ -129,7 +137,7 @@ export class CommandResolver {
     if (input.includes('check connection') || input.includes('ping')) {
       const command = 'ping -c 4 8.8.8.8';
       return {
-        command,
+        commands: [command],
         explanation: `Test internet connectivity to Google DNS`,
         tags: ['network', 'test'],
         confidence: 0.9,
@@ -140,7 +148,7 @@ export class CommandResolver {
     if (input.includes('show ip') || input.includes('get ip')) {
       if (os.platform === 'windows') {
         return {
-          command: 'ipconfig',
+          commands: ['ipconfig'],
           explanation: `Display IP configuration`,
           tags: ['network', 'info'],
           confidence: 0.9,
@@ -148,7 +156,7 @@ export class CommandResolver {
         };
       } else {
         return {
-          command: 'ip addr show',
+          commands: ['ip addr show'],
           explanation: `Display IP address information`,
           tags: ['network', 'info'],
           confidence: 0.9,
@@ -160,7 +168,7 @@ export class CommandResolver {
     // Git operations
     if (input.includes('git status') || input.includes('check git')) {
       return {
-        command: 'git status',
+        commands: ['git status'],
         explanation: `Show working tree status`,
         tags: ['git', 'status'],
         confidence: 0.95,
@@ -170,7 +178,7 @@ export class CommandResolver {
 
     if (input.includes('git add') || input.includes('stage changes')) {
       return {
-        command: 'git add .',
+        commands: ['git add .'],
         explanation: `Stage all changes for commit`,
         tags: ['git', 'stage'],
         confidence: 0.9,
@@ -180,17 +188,18 @@ export class CommandResolver {
 
     if (input.includes('git commit') || input.includes('commit changes')) {
       return {
-        command: 'git commit -m',
+        commands: ['git commit -m "{message}"'],
         explanation: `Commit staged changes with a message`,
         tags: ['git', 'commit'],
         confidence: 0.9,
-        source: 'rule'
+        source: 'rule',
+        variables: { message: '' }
       };
     }
 
     if (input.includes('git push') || input.includes('upload changes')) {
       return {
-        command: 'git push',
+        commands: ['git push'],
         explanation: `Push commits to remote repository`,
         tags: ['git', 'push'],
         confidence: 0.9,
@@ -200,7 +209,7 @@ export class CommandResolver {
 
     if (input.includes('git pull') || input.includes('download changes')) {
       return {
-        command: 'git pull',
+        commands: ['git pull'],
         explanation: `Pull latest changes from remote repository`,
         tags: ['git', 'pull'],
         confidence: 0.9,
@@ -211,7 +220,7 @@ export class CommandResolver {
     // Node.js operations
     if (input.includes('install npm packages') || input.includes('npm install')) {
       return {
-        command: 'npm install',
+        commands: ['npm install'],
         explanation: `Install dependencies from package.json`,
         tags: ['node', 'npm'],
         confidence: 0.9,
@@ -221,7 +230,7 @@ export class CommandResolver {
 
     if (input.includes('run npm script') || input.includes('npm start')) {
       return {
-        command: 'npm start',
+        commands: ['npm start'],
         explanation: `Run the start script defined in package.json`,
         tags: ['node', 'npm'],
         confidence: 0.9,
@@ -232,7 +241,7 @@ export class CommandResolver {
     // Docker operations
     if (input.includes('show containers') || input.includes('docker ps')) {
       return {
-        command: 'docker ps -a',
+        commands: ['docker ps -a'],
         explanation: `List all Docker containers`,
         tags: ['docker', 'list'],
         confidence: 0.9,
@@ -242,7 +251,7 @@ export class CommandResolver {
 
     if (input.includes('show images') || input.includes('docker images')) {
       return {
-        command: 'docker images',
+        commands: ['docker images'],
         explanation: `List all Docker images`,
         tags: ['docker', 'list'],
         confidence: 0.9,
@@ -254,7 +263,7 @@ export class CommandResolver {
     if (input.includes('show disk usage') || input.includes('disk space')) {
       if (os.platform === 'windows') {
         return {
-          command: 'wmic logicaldisk get size,freespace,caption',
+          commands: ['wmic logicaldisk get size,freespace,caption'],
           explanation: `Display disk space information`,
           tags: ['system', 'disk'],
           confidence: 0.9,
@@ -262,7 +271,7 @@ export class CommandResolver {
         };
       } else {
         return {
-          command: 'df -h',
+          commands: ['df -h'],
           explanation: `Display disk usage in human-readable format`,
           tags: ['system', 'disk'],
           confidence: 0.9,
@@ -274,7 +283,7 @@ export class CommandResolver {
     if (input.includes('show memory') || input.includes('ram usage')) {
       if (os.platform === 'windows') {
         return {
-          command: 'wmic OS get TotalVisibleMemorySize,FreePhysicalMemory',
+          commands: ['wmic OS get TotalVisibleMemorySize,FreePhysicalMemory'],
           explanation: `Display memory usage information`,
           tags: ['system', 'memory'],
           confidence: 0.9,
@@ -282,7 +291,7 @@ export class CommandResolver {
         };
       } else {
         return {
-          command: 'free -h',
+          commands: ['free -h'],
           explanation: `Display memory usage in human-readable format`,
           tags: ['system', 'memory'],
           confidence: 0.9,

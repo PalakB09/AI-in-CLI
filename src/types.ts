@@ -5,11 +5,12 @@ export interface OS {
 }
 
 export interface ResolvedCommand {
-  command: string;
+  commands: string[]; // Support multiple steps
   explanation: string;
   tags: string[];
   confidence: number;
   source: 'rule' | 'ai' | 'vault';
+  variables?: { [key: string]: string }; // For template substitution
 }
 
 export interface SafetyResult {

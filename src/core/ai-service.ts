@@ -98,6 +98,7 @@ STRICT RULES:
 - NO quotes
 - NO placeholders like command1
 - NO sentences
+- Use {variableName} for user inputs (e.g., git commit -m "{message}")
 ${chainingRule}
 - Prefer PowerShell-safe syntax on Windows
 
@@ -142,7 +143,7 @@ If there are 2 or more commands to achieve the user's goal, you MUST combine the
         );
       }
 
-      const data = await response.json();
+      const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
       return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null;
     } catch (error: any) {
       console.error("Gemini API call failed:", error.message);
@@ -172,8 +173,6 @@ If there are 2 or more commands to achieve the user's goal, you MUST combine the
     if (
       !cleaned ||
       cleaned.length > 180 ||
-      cleaned.includes("{") ||
-      cleaned.includes("}") ||
       cleaned.includes("command1") ||
       cleaned.includes("command2") ||
       cleaned.endsWith("?") ||
@@ -193,14 +192,36 @@ If there are 2 or more commands to achieve the user's goal, you MUST combine the
       return null;
     }
 
+    /* ---------------- SPLIT INTO STEPS ---------------- */
+
+    let commands: string[];
+    if (wantsMultiple && /[;&|]{1,2}/.test(cleaned)) {
+      // Split on && or ; or |
+      commands = cleaned.split(/\s*(&&|;|\|)\s*/).filter(cmd => cmd && !['&&', ';', '|'].includes(cmd));
+    } else {
+      commands = [cleaned];
+    }
+
+    /* ---------------- DETECT VARIABLES ---------------- */
+
+    const variables: { [key: string]: string } = {};
+    const varRegex = /\{(\w+)\}/g;
+    commands.forEach(cmd => {
+      let match;
+      while ((match = varRegex.exec(cmd)) !== null) {
+        variables[match[1]] = ''; // Placeholder, will be filled later
+      }
+    });
+
     /* ---------------- ACCEPT ---------------- */
 
     return {
-      command: cleaned,
+      commands,
       explanation: "Command suggested by AI",
       tags: ["ai"],
       confidence: wantsMultiple ? 0.75 : 0.6,
       source: "ai",
+      variables: Object.keys(variables).length > 0 ? variables : undefined,
     };
   }
 

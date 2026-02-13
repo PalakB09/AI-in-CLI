@@ -76,38 +76,83 @@ program
         );
       }
 
-      console.log(chalk.green("Suggested command:"));
-      console.log(chalk.cyan(resolvedCommand.command));
+      // Handle variables
+      let finalCommands = [...resolvedCommand.commands];
+      if (resolvedCommand.variables) {
+        const inquirer = require("inquirer");
+        const variablePrompts = Object.keys(resolvedCommand.variables).map(varName => ({
+          type: "input",
+          name: varName,
+          message: `Enter value for ${varName}:`,
+        }));
+        const answers = await inquirer.prompt(variablePrompts);
+        finalCommands = finalCommands.map(cmd => {
+          let substituted = cmd;
+          for (const [varName, value] of Object.entries(answers)) {
+            substituted = substituted.replace(new RegExp(`\\{${varName}\\}`, 'g'), String(value));
+          }
+          return substituted;
+        });
+      }
+
+      console.log(chalk.green("Suggested commands:"));
+      finalCommands.forEach((cmd, index) => {
+        console.log(`${index + 1}. ${chalk.cyan(cmd)}`);
+      });
 
       if (!options.dryRun && !safetyResult.blocked) {
         const inquirer = require("inquirer");
 
-        const { shouldExecute } = await inquirer.prompt([
-          {
-            type: "confirm",
-            name: "shouldExecute",
-            message: "Execute this command?",
-            default: false,
-          },
-        ]);
+        if (finalCommands.length > 1) {
+          console.log("\nThis is a multi-step workflow. Each step will be confirmed separately.");
+        }
 
-        if (shouldExecute) {
+        for (let i = 0; i < finalCommands.length; i++) {
+          const cmd = finalCommands[i];
+          console.log(`\n${chalk.blue("Step " + (i + 1) + ":")} ${chalk.cyan(cmd)}`);
+
+          const { shouldExecute } = await inquirer.prompt([
+            {
+              type: "confirm",
+              name: "shouldExecute",
+              message: finalCommands.length > 1 ? `Execute step ${i + 1}?` : "Execute this command?",
+              default: false,
+            },
+          ]);
+
+          if (!shouldExecute) {
+            console.log(chalk.yellow("Step skipped."));
+            continue;
+          }
+
           const { execSync } = require("child_process");
           try {
             const isWindows = process.platform === "win32";
 
             if (isWindows) {
-              execSync(`powershell -Command "${resolvedCommand.command}"`, {
+              execSync(`powershell -Command "${cmd}"`, {
                 stdio: "inherit",
               });
             } else {
-              execSync(resolvedCommand.command, { stdio: "inherit" });
+              execSync(cmd, { stdio: "inherit" });
             }
+            console.log(chalk.green(`Step ${i + 1} completed successfully.`));
           } catch (error) {
             console.error(
-              chalk.red("Command execution failed:"),
+              chalk.red(`Step ${i + 1} failed:`),
               error.message,
             );
+            const { continueWorkflow } = await inquirer.prompt([
+              {
+                type: "confirm",
+                name: "continueWorkflow",
+                message: "Continue with remaining steps?",
+                default: false,
+              },
+            ]);
+            if (!continueWorkflow) {
+              break;
+            }
           }
         }
       }
