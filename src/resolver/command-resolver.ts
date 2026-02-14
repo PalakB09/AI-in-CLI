@@ -1,14 +1,18 @@
 import { ResolvedCommand, OS } from '../types';
 import { AIService } from '../core/ai-service';
 import { StorageManager } from '../storage/storage-manager';
+import { PluginManager } from '../plugins/plugin-manager';
 
 export class CommandResolver {
   private aiService: AIService;
   private storage: StorageManager;
+  private pluginManager: PluginManager;
 
   constructor(aiService: AIService) {
   this.aiService = aiService;
   this.storage = new StorageManager();
+  this.pluginManager = new PluginManager();
+  this.pluginManager.loadPlugins();
 }
 
 
@@ -16,27 +20,33 @@ export class CommandResolver {
     const normalizedInput = input.toLowerCase().trim();
     const wantsMultiple = /\bthen\b|\band\b|\bafter that\b|\bfollowed by\b/i.test(input);
 
-    // Priority 1: Check command vault first
+    // Priority 1: Check plugins
+    const pluginResult = this.pluginManager.getRules(normalizedInput, os);
+    if (pluginResult) {
+      return { ...pluginResult, source: 'rule' };
+    }
+
+    // Priority 2: Check command vault first
     const vaultResult = await this.searchVault(normalizedInput);
     if (vaultResult) {
       return { ...vaultResult, source: 'vault' };
     }
 
     if (wantsMultiple) {
-      // Priority 2: Use AI for multi-step requests
+      // Priority 3: Use AI for multi-step requests
       const aiResult = await this.aiService.generateCommand(input, os);
       if (aiResult) {
         return { ...aiResult, source: 'ai' };
       }
     } else {
-      // Priority 2: Apply rule-based mappings for single commands
+      // Priority 3: Apply rule-based mappings for single commands
       const ruleResult = this.applyRules(normalizedInput, os);
       if (ruleResult) {
         return { ...ruleResult, source: 'rule' };
       }
     }
 
-    // Priority 3: Use AI fallback
+    // Priority 4: Use AI fallback
     const aiResult = await this.aiService.generateCommand(input, os);
     if (aiResult) {
       return { ...aiResult, source: 'ai' };
@@ -51,11 +61,12 @@ export class CommandResolver {
       if (commands.length > 0) {
         const bestMatch = commands[0]; // Assumes storage sorts by relevance
         return {
-          commands: [bestMatch.command],
+          commands: bestMatch.commands,
           explanation: bestMatch.description,
           tags: bestMatch.tags,
           confidence: bestMatch.confidence,
-          source: 'vault'
+          source: 'vault',
+          variables: bestMatch.variables,
         };
       }
     } catch (error) {

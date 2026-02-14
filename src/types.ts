@@ -22,7 +22,8 @@ export interface SafetyResult {
 
 export interface CommandEntry {
   id: string;
-  command: string;
+  name?: string; // Custom name/alias for the command
+  commands: string[]; // Support multiple commands
   description: string;
   tags: string[];
   usageCount: number;
@@ -30,6 +31,7 @@ export interface CommandEntry {
   createdAt: Date;
   confidence: number;
   source: 'rule' | 'ai' | 'user';
+  variables?: { [key: string]: string }; // For template substitution
 }
 
 export interface AIProvider {
@@ -37,4 +39,12 @@ export interface AIProvider {
   apiKey?: string;
   endpoint?: string;
   maxTokens?: number;
+}
+
+export interface Plugin {
+  name: string;
+  version: string;
+  getRules?: (input: string, os: OS) => ResolvedCommand | null;
+  getSafetyChecks?: (command: ResolvedCommand) => SafetyResult | null;
+  onCommandExecuted?: (command: ResolvedCommand, success: boolean) => void;
 }

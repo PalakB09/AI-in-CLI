@@ -36,42 +36,48 @@ export class StorageManager {
   }
 
   async addCommand(
-    command: string,
+    commands: string | string[],
     description?: string,
     tags: string[] = [],
     source: 'rule' | 'ai' | 'user' = 'user',
-    confidence: number = 0.7
+    confidence: number = 0.7,
+    variables?: { [key: string]: string },
+    name?: string
   ): Promise<void> {
-    const commands = await this.getAllCommands();
+    const commandList = await this.getAllCommands();
+    
+    const cmdArray = Array.isArray(commands) ? commands : [commands];
     
     const newEntry: CommandEntry = {
       id: this.generateId(),
-      command: command.trim(),
-      description: description || `Command: ${command}`,
+      name,
+      commands: cmdArray.map(c => c.trim()),
+      description: description || `Command: ${cmdArray.join('; ')}`,
       tags,
       usageCount: 0,
       lastUsed: new Date(),
       createdAt: new Date(),
       confidence,
-      source
+      source,
+      variables,
     };
 
     // Check for duplicates
-    const existingIndex = commands.findIndex(cmd => 
-      cmd.command.toLowerCase() === newEntry.command.toLowerCase()
+    const existingIndex = commandList.findIndex((cmd: CommandEntry) => 
+      cmd.commands.join(';').toLowerCase() === newEntry.commands.join(';').toLowerCase()
     );
 
     if (existingIndex >= 0) {
       // Update existing entry
-      commands[existingIndex].usageCount++;
-      commands[existingIndex].lastUsed = new Date();
-      commands[existingIndex].description = description || commands[existingIndex].description;
+      commandList[existingIndex].usageCount++;
+      commandList[existingIndex].lastUsed = new Date();
+      commandList[existingIndex].description = description || commandList[existingIndex].description;
     } else {
       // Add new entry
-      commands.push(newEntry);
+      commandList.push(newEntry);
     }
 
-    await this.saveCommands(commands);
+    await this.saveCommands(commandList);
     await this.updateMetadata(commands.length);
   }
   private reviveDates(cmd: CommandEntry): CommandEntry {
@@ -116,7 +122,7 @@ export class StorageManager {
     let score = 0;
     
     // Exact command match
-    if (command.command.toLowerCase().includes(query)) {
+    if (command.commands.join(' ').toLowerCase().includes(query)) {
       score += 100;
     }
 
@@ -159,6 +165,11 @@ export class StorageManager {
   async getCommandsBySource(source: 'rule' | 'ai' | 'user'): Promise<CommandEntry[]> {
     const commands = await this.getAllCommands();
     return commands.filter(cmd => cmd.source === source);
+  }
+
+  async getCommandByName(name: string): Promise<CommandEntry | null> {
+    const commands = await this.getAllCommands();
+    return commands.find(cmd => cmd.name === name) || null;
   }
 
   async updateCommandUsage(commandId: string): Promise<void> {
@@ -211,8 +222,8 @@ export class StorageManager {
 
     for (const importedCmd of importData.commands) {
       // Check for duplicates by command string
-      const existingIndex = mergedCommands.findIndex(cmd => 
-        cmd.command.toLowerCase() === importedCmd.command.toLowerCase()
+      const existingIndex = mergedCommands.findIndex((cmd: CommandEntry) => 
+        cmd.commands.join(';').toLowerCase() === (importedCmd.commands || [importedCmd.command]).join(';').toLowerCase()
       );
 
       if (existingIndex >= 0) {
@@ -224,16 +235,18 @@ export class StorageManager {
         ])];
       } else {
         // Add as new command with generated ID
+        const cmdArray = importedCmd.commands || (importedCmd.command ? [importedCmd.command] : []);
         mergedCommands.push({
           id: this.generateId(),
-          command: importedCmd.command,
-          description: importedCmd.description || `Command: ${importedCmd.command}`,
+          commands: cmdArray,
+          description: importedCmd.description || `Command: ${cmdArray.join('; ')}`,
           tags: importedCmd.tags || [],
           usageCount: importedCmd.usageCount || 0,
           lastUsed: new Date(importedCmd.lastUsed) || new Date(),
           createdAt: new Date(importedCmd.createdAt) || new Date(),
           confidence: importedCmd.confidence || 0.7,
-          source: importedCmd.source || 'user'
+          source: importedCmd.source || 'user',
+          variables: importedCmd.variables
         });
       }
     }
@@ -292,5 +305,15 @@ export class StorageManager {
       tagDistribution,
       sourceDistribution
     };
+  }
+
+  async incrementUsage(id: string): Promise<void> {
+    const commands = await this.getAllCommands();
+    const index = commands.findIndex(cmd => cmd.id === id);
+    if (index >= 0) {
+      commands[index].usageCount++;
+      commands[index].lastUsed = new Date();
+      await this.saveCommands(commands);
+    }
   }
 }

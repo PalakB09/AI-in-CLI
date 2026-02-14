@@ -220,7 +220,7 @@ program
         source: cmd.source
       })));
     } catch (error) {
-      console.error(chalk.red("Error listing vault:"), error instanceof Error ? error.message : String(error));
+      console.error(chalk.red("Error listing vault:"), error.message);
     }
   });
 
@@ -241,7 +241,7 @@ program
         confidence: cmd.confidence
       })));
     } catch (error) {
-      console.error(chalk.red("Error searching vault:"), error instanceof Error ? error.message : String(error));
+      console.error(chalk.red("Error searching vault:"), error.message);
     }
   });
 
@@ -267,7 +267,7 @@ program
       );
       console.log(chalk.green(cmdArray.length > 1 ? "✓ Script added to vault" : "✓ Command added to vault"));
     } catch (error) {
-      console.error(chalk.red("Error adding command:"), error instanceof Error ? error.message : String(error));
+      console.error(chalk.red("Error adding command:"), error.message);
     }
   });
 
@@ -422,7 +422,191 @@ program
         }
       }
     } catch (error) {
-      console.error(chalk.red("Error running command:"), error instanceof Error ? error.message : String(error));
+      console.error(chalk.red("Error running command:"), error.message);
+    }
+  });
+
+program
+  .command("debug")
+  .description("Show debugging information")
+        case "list":
+          const allCommands = await storage.getAllCommands();
+          console.table(allCommands.map(cmd => ({
+            id: cmd.id,
+            name: cmd.name || '',
+            commands: cmd.commands.join('; '),
+            description: cmd.description,
+            tags: cmd.tags.join(', '),
+            usageCount: cmd.usageCount,
+            source: cmd.source
+          })));
+          break;
+        case "search":
+          const results = await storage.searchCommands(query);
+          console.table(results.map(cmd => ({
+            id: cmd.id,
+            name: cmd.name || '',
+            commands: cmd.commands.join('; '),
+            description: cmd.description,
+            tags: cmd.tags.join(', '),
+            confidence: cmd.confidence
+          })));
+          break;
+        case "add":
+          if (!query) {
+            console.log(chalk.red("Please provide a command or script to add"));
+            return;
+          }
+          // For add action, the query should be the command, and options are used for name/description
+          const cmdArray = query.split(/\s*(&&|;)\s*/).filter((cmd: string) => cmd && !['&&', ';'].includes(cmd));
+          await storage.addCommand(
+            cmdArray.length > 1 ? cmdArray : query,
+            options.description,
+            [],
+            'user',
+            0.7,
+            undefined,
+            options.name
+          );
+          console.log(chalk.green(cmdArray.length > 1 ? "✓ Script added to vault" : "✓ Command added to vault"));
+          break;
+        case "run":
+          if (!query) {
+            console.log(chalk.red("Please provide a command ID or name to run"));
+            return;
+          }
+          const allCmds = await storage.getAllCommands();
+          let cmdToRun = allCmds.find(cmd => cmd.id === query);
+          
+          // If not found by ID, try to find by name
+          if (!cmdToRun) {
+            cmdToRun = allCmds.find(cmd => cmd.name === query);
+          }
+          
+          if (!cmdToRun) {
+            console.log(chalk.red(`Command with ID or name '${query}' not found`));
+            return;
+          }
+          
+          // Increment usage
+          await storage.incrementUsage(cmdToRun.id);
+          
+          // Execute the command like in suggest
+          const resolvedCommand: ResolvedCommand = {
+            commands: cmdToRun.commands,
+            explanation: cmdToRun.description,
+            tags: cmdToRun.tags,
+            confidence: cmdToRun.confidence,
+            source: cmdToRun.source as any,
+            variables: cmdToRun.variables
+          };
+
+          const validator = new SafetyValidator();
+          const osAdapter = new OSAdapter();
+          const pluginManager = new PluginManager();
+          await pluginManager.loadPlugins();
+
+          const safetyResult = await validator.validate(resolvedCommand);
+
+          if (safetyResult.warning) {
+            console.log(
+              chalk.yellow("⚠️  SAFETY WARNING: ") + safetyResult.warning,
+            );
+          }
+
+          // Handle variables
+          let finalCommands = [...resolvedCommand.commands];
+          if (resolvedCommand.variables) {
+            const inquirer = require("inquirer");
+            const variablePrompts = Object.keys(resolvedCommand.variables).map(varName => ({
+              type: "input",
+              name: varName,
+              message: `Enter value for ${varName}:`,
+            }));
+            const answers = await inquirer.prompt(variablePrompts);
+            finalCommands = finalCommands.map(cmd => {
+              let substituted = cmd;
+              for (const [varName, value] of Object.entries(answers)) {
+                substituted = substituted.replace(new RegExp(`\\{${varName}\\}`, 'g'), value as string);
+              }
+              return substituted;
+            });
+          }
+
+          console.log(chalk.green("Running script:"));
+          finalCommands.forEach((cmd, index) => {
+            console.log(`${index + 1}. ${chalk.cyan(cmd)}`);
+          });
+
+          if (safetyResult.blocked) {
+            console.log(chalk.red("⚠️  SAFETY BLOCK: ") + safetyResult.reason);
+            return;
+          }
+
+          const inquirer = require("inquirer");
+
+          if (finalCommands.length > 1) {
+            console.log("\nThis is a multi-step script. Each step will be confirmed separately.");
+          }
+
+          for (let i = 0; i < finalCommands.length; i++) {
+            const cmd = finalCommands[i];
+            console.log(`\n${chalk.blue("Step " + (i + 1) + ":")} ${chalk.cyan(cmd)}`);
+
+            const { shouldExecute } = await inquirer.prompt([
+              {
+                type: "confirm",
+                name: "shouldExecute",
+                message: finalCommands.length > 1 ? `Execute step ${i + 1}?` : "Execute this command?",
+                default: false,
+              },
+            ]);
+
+            if (!shouldExecute) {
+              console.log(chalk.yellow("Step skipped."));
+              continue;
+            }
+
+            const { execSync } = require("child_process");
+            try {
+              const isWindows = process.platform === "win32";
+
+              if (isWindows) {
+                execSync(`powershell -Command "${cmd}"`, {
+                  stdio: "inherit",
+                });
+              } else {
+                execSync(cmd, { stdio: "inherit" });
+              }
+              console.log(chalk.green(`Step ${i + 1} completed successfully.`));
+              pluginManager.onCommandExecuted(resolvedCommand, true);
+            } catch (error) {
+              console.error(
+                chalk.red(`Step ${i + 1} failed:`),
+                error instanceof Error ? error.message : String(error),
+              );
+              pluginManager.onCommandExecuted(resolvedCommand, false);
+              const { continueWorkflow } = await inquirer.prompt([
+                {
+                  type: "confirm",
+                  name: "continueWorkflow",
+                  message: "Continue with remaining steps?",
+                  default: false,
+                },
+              ]);
+              if (!continueWorkflow) {
+                break;
+              }
+            }
+          }
+          break;
+        default:
+          console.log(
+            chalk.red("Invalid action. Use: list, search, add, run"),
+          );
+      }
+    } catch (error) {
+      console.error(chalk.red("Error:"), error instanceof Error ? error.message : String(error));
     }
   });
 

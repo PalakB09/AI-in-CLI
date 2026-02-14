@@ -1,7 +1,54 @@
 import { ResolvedCommand, SafetyResult } from "../types";
+import { PluginManager } from "../plugins/plugin-manager";
 
 export class SafetyValidator {
   private readonly dangerousPatterns = [
+    // System destruction
+    /rm\s+-rf\s+\/($|\s)/i,
+    /rmdir\/s\/q\s+c:\\\\/i,
+    /format\s+c:/i,
+    /mkfs\./i,
+    /dd\s+if=.*of=\/dev\/sd/i,
+
+    // Process killing
+    /kill\s+-9\s+1$/i,
+    /killall\s+-9/i,
+    /taskkill\/f/i,
+
+    // Docker dangerous operations
+    /docker\s+system\s+prune\s+-af/i,
+    /docker\s+rm\s+-vf/i,
+    /docker\s+rmi\s+-f/i,
+
+    // Network configuration
+    /iptables\s+-F/i,
+    /ip\s+link\s+set.*down/i,
+    /netsh.*reset/i,
+
+    // User management
+    /userdel\s+-r/i,
+    /deluser.*--remove-home/i,
+
+    // Configuration files
+    />\s*\/etc\/passwd/i,
+    />\s*\/etc\/shadow/i,
+    />\s*\/etc\/sudoers/i,
+
+    // Boot management
+    /update-grub/i,
+    /grub-install/i,
+    /bootsect/i,
+  ];
+
+  private readonly warningPatterns = [
+    // File deletion
+    /rm\s+-rf/i,
+    /rmdir\/s/i,
+    /del.*\/s/i,
+
+    // Disk operations
+    /fdisk/i,
+    /diskpart/i,
     /rm\s+-rf\s+\/($|\s)/i,
     /rmdir\/s\/q\s+c:\\\\/i,
     /format\s+c:/i,
@@ -32,31 +79,12 @@ export class SafetyValidator {
     /bootsect/i,
   ];
 
-  private readonly warningPatterns = [
-    /rm\s+-rf/i,
-    /rmdir\/s/i,
-    /del.*\/s/i,
+  private pluginManager: PluginManager;
 
-    /fdisk/i,
-    /diskpart/i,
-    /format/i,
-
-    /kill\s+-9/i,
-    /taskkill\/f/i,
-
-    /systemctl\s+stop/i,
-    /service.*stop/i,
-    /net\s+stop/i,
-
-    /apt-get\s+remove/i,
-    /yum\s+remove/i,
-    /dnf\s+remove/i,
-    /npm\s+uninstall/i,
-
-    /chmod\s+777/i,
-    /icacls.*grant/i,
-    /attrib.*-r/i,
-  ];
+  constructor() {
+    this.pluginManager = new PluginManager();
+    this.pluginManager.loadPlugins();
+  }
 
   async validate(resolvedCommand: ResolvedCommand): Promise<SafetyResult> {
     for (const command of resolvedCommand.commands) {
@@ -81,6 +109,12 @@ export class SafetyValidator {
           };
         }
       }
+    }
+
+    // Check plugin safety rules
+    const pluginResult = this.pluginManager.getSafetyChecks(resolvedCommand);
+    if (pluginResult) {
+      return pluginResult;
     }
 
     const contextWarnings = this.checkContextualDangers(resolvedCommand);

@@ -2,12 +2,15 @@ import { ResolvedCommand, OS, AIProvider } from "../types";
 import * as fs from "fs-extra";
 import * as path from "path";
 import * as os from "os";
+import { CacheManager } from "../cache/cache-manager";
 
 export class AIService {
   private configPath: string;
+  private cache: CacheManager;
 
   constructor() {
     this.configPath = path.join(os.homedir(), ".ai-cli", "config.json");
+    this.cache = new CacheManager();
   }
 
   async generateCommand(
@@ -15,6 +18,14 @@ export class AIService {
     osInfo: OS
   ): Promise<ResolvedCommand | null> {
     try {
+      // Check cache first
+      const cachedResponse = await this.cache.get(input, osInfo);
+      if (cachedResponse) {
+        console.log('[CACHE HIT]');
+        const parsed = this.parseAIResponse(cachedResponse, /\bthen\b|\band\b|\bafter that\b|\bfollowed by\b/i.test(input));
+        return parsed;
+      }
+
       const provider = await this.getAvailableProvider();
       if (!provider) return null;
 
@@ -25,6 +36,9 @@ export class AIService {
       const response = await this.callAI(provider, prompt);
 
       if (!response) return null;
+
+      // Cache the response
+      await this.cache.set(input, osInfo, response);
 
       const parsed = this.parseAIResponse(response, wantsMultiple);
       return parsed;
@@ -182,20 +196,18 @@ If there are 2 or more commands to achieve the user's goal, you MUST combine the
       return null;
     }
 
-    // Reject sentences
-    if (cleaned.split(" ").length > 10 && !/[;&|]/.test(cleaned)) {
-      return null;
-    }
-
-    // If multiple steps were requested, enforce chaining
-    if (wantsMultiple && !/[;&|]{1,2}/.test(cleaned)) {
-      return null;
+    // If multiple steps were requested or separators are present, enforce chaining
+    let hasSeparators = /[;&|]{1,2}/.test(cleaned);
+    if (wantsMultiple || hasSeparators) {
+      if (!hasSeparators) {
+        return null; // Wants multiple but no separators
+      }
     }
 
     /* ---------------- SPLIT INTO STEPS ---------------- */
 
     let commands: string[];
-    if (wantsMultiple && /[;&|]{1,2}/.test(cleaned)) {
+    if (hasSeparators) {
       // Split on && or ; or |
       commands = cleaned.split(/\s*(&&|;|\|)\s*/).filter(cmd => cmd && !['&&', ';', '|'].includes(cmd));
     } else {
