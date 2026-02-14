@@ -72,6 +72,8 @@ export class StorageManager {
       commandList[existingIndex].usageCount++;
       commandList[existingIndex].lastUsed = new Date();
       commandList[existingIndex].description = description || commandList[existingIndex].description;
+      if (name) commandList[existingIndex].name = name;
+      if (variables) commandList[existingIndex].variables = variables;
     } else {
       // Add new entry
       commandList.push(newEntry);

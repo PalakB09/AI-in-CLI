@@ -248,24 +248,62 @@ program
 program
   .command("vault:add")
   .description("Add a command to vault")
-  .argument("<command>", "Command or script to add")
   .option("-n, --name <name>", "Custom name for the command")
   .option("-d, --description <description>", "Description for the command")
+  .argument("[command]", "Command or script to add")
   .action(async (command, options) => {
+    // Manual parsing since commander.js has issues with options and arguments containing special chars
+    const args = process.argv.slice(3); // Skip 'node', 'dist/cli.js', 'vault:add'
+    
+    let name: string | undefined;
+    let description: string | undefined;
+    let cmd: string | undefined;
+    
+    // First argument is the command
+    cmd = args[0];
+    
+    // Parse options
+    for (let i = 1; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === '-n' || arg === '--name') {
+        name = args[i + 1];
+        i++; // Skip next arg
+      } else if (arg === '-d' || arg === '--description') {
+        description = args[i + 1];
+        i++; // Skip next arg
+      }
+    }
     try {
       const storage = new StorageManager();
       // Split on ; or && for multi-command scripts
-      const cmdArray = command.split(/\s*(&&|;)\s*/).filter((cmd: string) => cmd && !['&&', ';'].includes(cmd));
+      const cmdArray = cmd.split(/\s*(&&|;)\s*/).filter((c: string) => c && !['&&', ';'].includes(c));
+      
+      // Extract variables from all commands
+      const variables: { [key: string]: string } = {};
+      const variableRegex = /\{([^}]+)\}/g;
+      const allCommands = cmdArray.length > 1 ? cmdArray : [cmd];
+      
+      allCommands.forEach((c: string) => {
+        let match;
+        while ((match = variableRegex.exec(c)) !== null) {
+          const varName = match[1];
+          variables[varName] = ""; // Empty description for now
+        }
+      });
+      
       await storage.addCommand(
-        cmdArray.length > 1 ? cmdArray : command,
-        options.description,
+        cmdArray.length > 1 ? cmdArray : cmd,
+        description,
         [],
         'user',
         0.7,
-        undefined,
-        options.name
+        Object.keys(variables).length > 0 ? variables : undefined,
+        name
       );
       console.log(chalk.green(cmdArray.length > 1 ? "✓ Script added to vault" : "✓ Command added to vault"));
+      if (Object.keys(variables).length > 0) {
+        console.log(chalk.blue(`Variables detected: ${Object.keys(variables).join(', ')}`));
+      }
     } catch (error) {
       console.error(chalk.red("Error adding command:"), error instanceof Error ? error.message : String(error));
     }

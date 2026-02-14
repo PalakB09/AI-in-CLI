@@ -50,6 +50,9 @@ ai vault:search "git"
 # Add command to vault with custom name
 ai vault:add --name "status-check" --description "Show git status" "git status --porcelain"
 
+# Add command with variables
+ai vault:add --name "greet" --description "Personalized greeting" "echo Hello {name}!"
+
 # Add command to vault (auto-generated ID)
 ai vault:add "git status --porcelain" --description "Show git status"
 
@@ -64,6 +67,22 @@ ai vault:run abc123def
 ```
 
 ## Command Vault Features
+
+### Variable Substitution
+Store commands with dynamic variables that get replaced with user input when executed:
+
+```bash
+# Add command with variables
+ai vault:add --name "greet" --description "Personalized greeting" "echo Hello {name}, welcome to {place}!"
+
+# Run command (will prompt for variable values)
+ai vault:run greet
+# Output: Enter value for name: Alice
+#         Enter value for place: Wonderland
+#         Hello Alice, welcome to Wonderland!
+```
+
+Variables use the `{variable_name}` syntax and are automatically detected when adding commands to the vault.
 
 ### Custom Names
 Store commands with memorable names for easy recall:
@@ -116,19 +135,6 @@ ai vault:list
    - Usage frequency tracking
    - Import/export functionality
 
-## Configuration
-
-### AI Provider Setup
-
-Set your preferred AI provider API key:
-
-```bash
-# OpenAI
-export OPENAI_API_KEY="your-api-key"
-
-# Or configure permanently
-ai configure --provider openai --api-key your-api-key
-```
 
 ### Shell Installation
 
