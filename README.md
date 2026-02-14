@@ -7,7 +7,8 @@ A cross-platform CLI tool that integrates with existing terminals to provide AI-
 - **Shell Integration**: Works with Bash, Zsh, PowerShell, and CMD
 - **Safety-First**: Blocks dangerous commands and warns about risky operations
 - **Rule-Based Resolution**: Fast deterministic command mapping with AI fallback
-- **Command Vault**: Local storage of frequently used commands with tag-based search
+- **Command Vault**: Local storage of frequently used commands with custom names and tag-based search
+- **Name-Based Execution**: Run stored commands using memorable names instead of auto-generated IDs
 - **Cross-Platform**: Windows, Linux, and macOS support with OS-specific adaptations
 - **No Custom Terminal**: Integrates with your existing shell, no new UI required
 
@@ -44,13 +45,49 @@ ai suggest "remove all log files" --explain
 ai suggest "compress folder" --dry-run
 
 # Search command vault
-ai vault search "git"
+ai vault:search "git"
 
-# Add command to vault
-ai vault add "git status --porcelain" "Show git status in porcelain format" git,status
+# Add command to vault with custom name
+ai vault:add --name "status-check" --description "Show git status" "git status --porcelain"
+
+# Add command to vault (auto-generated ID)
+ai vault:add "git status --porcelain" --description "Show git status"
 
 # List all commands in vault
-ai vault list
+ai vault:list
+
+# Run command by custom name
+ai vault:run status-check
+
+# Run command by ID
+ai vault:run abc123def
+```
+
+## Command Vault Features
+
+### Custom Names
+Store commands with memorable names for easy recall:
+
+```bash
+# Add with custom name
+ai vault:add --name "deploy-app" --description "Deploy application to production" "npm run build && npm run deploy"
+
+# Run by name
+ai vault:run deploy-app
+```
+
+### Name vs ID
+- **Custom Names**: Human-readable identifiers (e.g., "deploy-app", "cleanup-logs")
+- **Auto-generated IDs**: Unique alphanumeric strings (e.g., "abc123def")
+- **Backward Compatibility**: Existing commands work with IDs; new commands can use names
+
+### Search and Discovery
+```bash
+# Search by command content, description, or tags
+ai vault:search "git status"
+
+# View all commands with names and usage stats
+ai vault:list
 ```
 
 ## Architecture
@@ -75,7 +112,7 @@ ai vault list
 
 4. **Storage System**
    - Local JSON storage in `~/.ai-cli/`
-   - Tag-based search and filtering
+   - Custom names and tag-based search
    - Usage frequency tracking
    - Import/export functionality
 
@@ -122,15 +159,20 @@ ai install --shell powershell
 - `ai suggest <input>` - Get command suggestion
 - `ai install [--shell <type>]` - Install shell integration
 - `ai uninstall [--shell <type>]` - Remove shell integration
-- `ai vault [action] [query]` - Manage command vault
+- `ai vault:list` - List all stored commands
+- `ai vault:search <query>` - Search commands in vault
+- `ai vault:add [options] <command>` - Add command to vault
+- `ai vault:run <idOrName>` - Run stored command by ID or name
 - `ai debug` - Show system information
 
 ### Vault Commands
 
-- `ai vault list` - List all stored commands
-- `ai vault search <query>` - Search commands
-- `ai vault add "<command>" ["description"] [tags...]` - Add command
-- `ai vault remove <id>` - Remove command
+- `ai vault:list` - List all stored commands
+- `ai vault:search <query>` - Search commands in vault
+- `ai vault:add [options] <command>` - Add command to vault
+  - `--name <name>` - Custom name for the command
+  - `--description <description>` - Description for the command
+- `ai vault:run <idOrName>` - Run stored command by ID or custom name
 
 ### Options
 
@@ -193,6 +235,24 @@ ai suggest "show running processes"
 
 ai suggest "check disk space"
 # Output: df -h (Unix) or wmic logicaldisk (Windows)
+```
+
+### Vault Management
+```bash
+# Store frequently used commands with names
+ai vault:add --name "cleanup" --description "Remove temporary files" "rm -rf /tmp/*"
+
+# Run by name anytime
+ai vault:run cleanup
+
+# Store deployment script
+ai vault:add --name "deploy" --description "Full deployment pipeline" "npm run build && npm run test && npm run deploy"
+
+# Execute deployment
+ai vault:run deploy
+
+# Search your command library
+ai vault:search "git"
 ```
 
 ## Development
@@ -269,23 +329,6 @@ npm uninstall -g ai-cli-assistant
 2. Delete `~/.ai-cli/` directory
 3. Remove global npm package
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all linting passes
-5. Submit a pull request
-
-### Testing
-```bash
-npm test
-npm run coverage
-```
-
-## License
-
-MIT License - see LICENSE file for details.
 
 ## Security
 
@@ -294,11 +337,5 @@ MIT License - see LICENSE file for details.
 - Safety validation on all commands
 - Local configuration only
 
-## Support
-
-- GitHub Issues: https://github.com/your-repo/ai-cli-assistant/issues
-- Documentation: https://github.com/your-repo/ai-cli-assistant/wiki
-
----
 
 **Warning**: This tool executes commands on your system. Always review suggestions before execution, especially those with warnings or high risk levels.
