@@ -10,54 +10,94 @@ interface CacheEntry {
 }
 
 export class CacheManager {
-  private cachePath: string;
-  private cacheDuration: number; // in milliseconds, default 1 hour
+  private readonly cachePath: string;
+  private readonly cacheDuration: number;
+  private readonly maxEntries = 500;
 
   constructor(cacheDurationMs: number = 60 * 60 * 1000) {
-    this.cachePath = path.join(require('os').homedir(), ".ai-cli", "cache.json");
+    this.cachePath = path.join(
+      require("os").homedir(),
+      ".ai-cli",
+      "cache.json"
+    );
     this.cacheDuration = cacheDurationMs;
   }
 
-  private getCacheKey(input: string, os: OS): string {
-    const data = `${input}|${os.platform}|${os.arch}|${os.shell || ''}`;
-    return crypto.createHash('sha256').update(data).digest('hex');
+  private async ensureCacheDir(): Promise<void> {
+    await fs.ensureDir(path.dirname(this.cachePath));
   }
 
-  async get(input: string, os: OS): Promise<string | null> {
+  private getCacheKey(
+    input: string,
+    os: OS,
+    learningMode: boolean,
+    model: string = "gemini-2.5-flash",
+    promptVersion: string = "v1"
+  ): string {
+    const data = [
+      input,
+      os.platform,
+      os.arch,
+      os.shell ?? "",
+      learningMode ? "learning" : "normal",
+      model,
+      promptVersion,
+    ].join("|");
+
+    return crypto.createHash("sha256").update(data).digest("hex");
+  }
+
+  async get(
+    input: string,
+    os: OS,
+    learningMode: boolean
+  ): Promise<string | null> {
     try {
-      if (!await fs.pathExists(this.cachePath)) return null;
+      if (!(await fs.pathExists(this.cachePath))) return null;
 
       const cache = await fs.readJson(this.cachePath);
-      const key = this.getCacheKey(input, os);
-      const entry: CacheEntry = cache[key];
+      const key = this.getCacheKey(input, os, learningMode);
+      const entry: CacheEntry | undefined = cache[key];
 
       if (!entry) return null;
 
       if (Date.now() > entry.expiresAt) {
         delete cache[key];
-        await fs.writeJson(this.cachePath, cache);
+        await this.writeCache(cache);
         return null;
       }
 
       return entry.response;
-    } catch (error) {
-      console.warn("Cache read error:", error instanceof Error ? error.message : String(error));
+    } catch {
       return null;
     }
   }
 
-  async set(input: string, os: OS, response: string): Promise<void> {
+  async set(
+    input: string,
+    os: OS,
+    learningMode: boolean,
+    response: string
+  ): Promise<void> {
     try {
-      const cache = (await fs.pathExists(this.cachePath)) ? await fs.readJson(this.cachePath) : {};
-      const key = this.getCacheKey(input, os);
+      await this.ensureCacheDir();
+
+      const cache = (await fs.pathExists(this.cachePath))
+        ? await fs.readJson(this.cachePath)
+        : {};
+
+      const key = this.getCacheKey(input, os, learningMode);
+
       cache[key] = {
         response,
         timestamp: Date.now(),
         expiresAt: Date.now() + this.cacheDuration,
       };
-      await fs.writeJson(this.cachePath, cache);
-    } catch (error) {
-      console.warn("Cache write error:", error instanceof Error ? error.message : String(error));
+
+      this.evictOldEntries(cache);
+      await this.writeCache(cache);
+    } catch {
+      // Silent fail — cache must never break CLI
     }
   }
 
@@ -66,8 +106,24 @@ export class CacheManager {
       if (await fs.pathExists(this.cachePath)) {
         await fs.remove(this.cachePath);
       }
-    } catch (error) {
-      console.warn("Cache clear error:", error instanceof Error ? error.message : String(error));
+    } catch {
+      // Ignore
     }
+  }
+
+  private evictOldEntries(cache: Record<string, CacheEntry>): void {
+    const keys = Object.keys(cache);
+    if (keys.length <= this.maxEntries) return;
+
+    keys
+      .sort((a, b) => cache[a].timestamp - cache[b].timestamp)
+      .slice(0, keys.length - this.maxEntries)
+      .forEach(k => delete cache[k]);
+  }
+
+  private async writeCache(cache: Record<string, CacheEntry>): Promise<void> {
+    const tmpPath = this.cachePath + ".tmp";
+    await fs.writeJson(tmpPath, cache);
+    await fs.move(tmpPath, this.cachePath, { overwrite: true });
   }
 }

@@ -1,21 +1,10 @@
 #!/usr/bin/env node
 import dotenv from "dotenv";
 import path from "path";
-
-dotenv.config({
-  path: path.resolve(process.cwd(), ".env"),
-  override: true,
-});
-console.log(
-  "[ENV]",
-  "CWD =", process.cwd(),
-  "| GEMINI_API_KEY =",
-  process.env.GEMINI_API_KEY?.slice(0, 6) || "NOT FOUND"
-);
-
-
-import { Command } from "commander";
 import chalk from "chalk";
+import { Command } from "commander";
+import { spawn } from "child_process";
+
 import { AIService } from "./core/ai-service";
 import { ShellIntegrator } from "./shell/shell-integrator";
 import { CommandResolver } from "./resolver/command-resolver";
@@ -25,6 +14,11 @@ import { OSAdapter } from "./os/os-adapter";
 import { PluginManager } from "./plugins/plugin-manager";
 import { ResolvedCommand } from "./types";
 
+dotenv.config({
+  path: path.resolve(process.cwd(), ".env"),
+  override: true,
+});
+
 const program = new Command();
 
 program
@@ -32,455 +26,225 @@ program
   .description("AI-powered command assistant for existing terminals")
   .version("1.0.0");
 
+/* ---------------------------------------------------- */
+/* SHARED INITIALIZATION                                */
+/* ---------------------------------------------------- */
+
+async function createContext() {
+  const pluginManager = new PluginManager();
+  await pluginManager.init();
+
+  const aiService = new AIService();
+  const resolver = new CommandResolver(aiService, pluginManager);
+  const validator = new SafetyValidator(pluginManager);
+  const storage = new StorageManager();
+  const osAdapter = new OSAdapter();
+
+  return {
+    pluginManager,
+    resolver,
+    validator,
+    storage,
+    osAdapter,
+  };
+}
+
+/* ---------------------------------------------------- */
+/* EXECUTION PIPELINE                                   */
+/* ---------------------------------------------------- */
+
+async function executeResolvedCommand(
+  resolved: ResolvedCommand,
+  validator: SafetyValidator
+): Promise<void> {
+  const safety = await validator.validate(resolved);
+
+  if (safety.blocked) {
+    console.log(chalk.red("🚫 BLOCKED:"), safety.reason);
+    return;
+  }
+
+  if (safety.warning) {
+    console.log(chalk.yellow("⚠️ WARNING:"), safety.warning);
+  }
+
+  // Handle variables
+  let commands = [...resolved.commands];
+  if (resolved.variables) {
+    const inquirer = require("inquirer");
+    const answers = await inquirer.prompt(
+      Object.keys(resolved.variables).map(name => ({
+        type: "input",
+        name,
+        message: `Enter value for ${name}:`,
+      }))
+    );
+
+    commands = commands.map(cmd => {
+      let result = cmd;
+      for (const [k, v] of Object.entries(answers)) {
+        result = result.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
+      }
+      return result;
+    });
+  }
+
+  console.log(chalk.green("Commands:"));
+  commands.forEach((c, i) => {
+    console.log(`${i + 1}. ${chalk.cyan(c)}`);
+  });
+
+  const inquirer = require("inquirer");
+
+  for (let i = 0; i < commands.length; i++) {
+    const { execute } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "execute",
+        message:
+          commands.length > 1
+            ? `Execute step ${i + 1}?`
+            : "Execute this command?",
+        default: false,
+      },
+    ]);
+
+    if (!execute) {
+      console.log(chalk.yellow("Skipped."));
+      continue;
+    }
+
+    await runCommand(commands[i]);
+  }
+}
+
+async function runCommand(cmd: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const isWindows = process.platform === "win32";
+
+    const child = isWindows
+      ? spawn("powershell", ["-Command", cmd], { stdio: "inherit" })
+      : spawn(cmd, { shell: true, stdio: "inherit" });
+
+    child.on("exit", code => {
+      if (code === 0) resolve();
+      else reject(new Error(`Command failed with exit code ${code}`));
+    });
+
+    child.on("error", reject);
+  });
+}
+
+/* ---------------------------------------------------- */
+/* COMMAND: suggest                                     */
+/* ---------------------------------------------------- */
+
 program
   .command("suggest")
-  .description("Get command suggestions for natural language input")
-  .argument("<input...>", "Natural language description of desired action")
-  .option("-e, --explain", "Explain the suggested command before execution")
-  .option("-d, --dry-run", "Show what would be executed without running")
-  .option("--shell <shell>", "Specify shell type (bash/zsh/powershell/cmd)")
-  .action(async (inputParts: string[], options) => {
-    console.log('RAW INPUT Parts:', inputParts);
+  .argument("<input...>")
+  .option("-e, --explain", "Explain command")
+  .option("-l, --learning", "Enable learning mode")
+  .action(async (inputParts, options) => {
     const input = inputParts.join(" ");
-    console.log('RAW INPUT:', input);
-    try {
-      const aiService = new AIService();
-      const resolver = new CommandResolver(aiService);
+    const ctx = await createContext();
 
-      const validator = new SafetyValidator();
-      const osAdapter = new OSAdapter();
-      const pluginManager = new PluginManager();
-      await pluginManager.loadPlugins();
+    const resolved = await ctx.resolver.resolve(
+      input,
+      ctx.osAdapter.getOS(),
+      options.learning,
+      true
+    );
 
-      const resolvedCommand = await resolver.resolve(input, osAdapter.getOS());
-
-      if (!resolvedCommand) {
-        console.log(
-          chalk.yellow("Could not resolve your request to a command."),
-        );
-        return;
-      }
-
-      const safetyResult = await validator.validate(resolvedCommand);
-
-      if (options.explain || safetyResult.warning) {
-        console.log(chalk.blue("Command explanation:"));
-        console.log(resolvedCommand.explanation || "No explanation available");
-        console.log("");
-      }
-
-      if (safetyResult.blocked) {
-        console.log(chalk.red("⚠️  SAFETY BLOCK: ") + safetyResult.reason);
-        return;
-      }
-
-      if (safetyResult.warning) {
-        console.log(
-          chalk.yellow("⚠️  SAFETY WARNING: ") + safetyResult.warning,
-        );
-      }
-
-      // Handle variables
-      let finalCommands = [...resolvedCommand.commands];
-      if (resolvedCommand.variables) {
-        const inquirer = require("inquirer");
-        const variablePrompts = Object.keys(resolvedCommand.variables).map(varName => ({
-          type: "input",
-          name: varName,
-          message: `Enter value for ${varName}:`,
-        }));
-        const answers = await inquirer.prompt(variablePrompts);
-        finalCommands = finalCommands.map(cmd => {
-          let substituted = cmd;
-          for (const [varName, value] of Object.entries(answers)) {
-            substituted = substituted.replace(new RegExp(`\\{${varName}\\}`, 'g'), String(value));
-          }
-          return substituted;
-        });
-      }
-
-      console.log(chalk.green("Suggested commands:"));
-      finalCommands.forEach((cmd, index) => {
-        console.log(`${index + 1}. ${chalk.cyan(cmd)}`);
-      });
-
-      if (!options.dryRun && !safetyResult.blocked) {
-        const inquirer = require("inquirer");
-
-        if (finalCommands.length > 1) {
-          console.log("\nThis is a multi-step workflow. Each step will be confirmed separately.");
-        }
-
-        for (let i = 0; i < finalCommands.length; i++) {
-          const cmd = finalCommands[i];
-          console.log(`\n${chalk.blue("Step " + (i + 1) + ":")} ${chalk.cyan(cmd)}`);
-
-          const { shouldExecute } = await inquirer.prompt([
-            {
-              type: "confirm",
-              name: "shouldExecute",
-              message: finalCommands.length > 1 ? `Execute step ${i + 1}?` : "Execute this command?",
-              default: false,
-            },
-          ]);
-
-          if (!shouldExecute) {
-            console.log(chalk.yellow("Step skipped."));
-            continue;
-          }
-
-          const { execSync } = require("child_process");
-          try {
-            const isWindows = process.platform === "win32";
-
-            if (isWindows) {
-              execSync(`powershell -Command "${cmd}"`, {
-                stdio: "inherit",
-              });
-            } else {
-              execSync(cmd, { stdio: "inherit" });
-            }
-            console.log(chalk.green(`Step ${i + 1} completed successfully.`));
-            pluginManager.onCommandExecuted(resolvedCommand, true);
-          } catch (error) {
-            console.error(
-              chalk.red(`Step ${i + 1} failed:`),
-              error instanceof Error ? error.message : String(error),
-            );
-            pluginManager.onCommandExecuted(resolvedCommand, false);
-            const { continueWorkflow } = await inquirer.prompt([
-              {
-                type: "confirm",
-                name: "continueWorkflow",
-                message: "Continue with remaining steps?",
-                default: false,
-              },
-            ]);
-            if (!continueWorkflow) {
-              break;
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error(chalk.red("Error:"), error instanceof Error ? error.message : String(error));
-      process.exit(1);
+    if (!resolved) {
+      console.log(chalk.yellow("Could not resolve command."));
+      return;
     }
+
+    if (options.explain) {
+      console.log(chalk.blue("Explanation:"));
+      console.log(resolved.explanation);
+    }
+
+    await executeResolvedCommand(resolved, ctx.validator);
   });
+
+/* ---------------------------------------------------- */
+/* COMMAND: install / uninstall                         */
+/* ---------------------------------------------------- */
 
 program
   .command("install")
-  .description("Install shell integration")
-  .option("--shell <shell>", "Shell type (bash/zsh/powershell/cmd)")
-  .action(async (options) => {
-    try {
-      const integrator = new ShellIntegrator();
-      await integrator.install(options.shell);
-      console.log(chalk.green("✓ Shell integration installed successfully"));
-    } catch (error) {
-      console.error(chalk.red("Installation failed:"), error instanceof Error ? error.message : String(error));
-    }
+  .option("--shell <shell>")
+  .action(async options => {
+    const integrator = new ShellIntegrator();
+    await integrator.install(options.shell);
+    console.log(chalk.green("✓ Shell integration installed"));
   });
 
 program
   .command("uninstall")
-  .description("Remove shell integration")
-  .option("--shell <shell>", "Shell type (bash/zsh/powershell/cmd)")
-  .action(async (options) => {
-    try {
-      const integrator = new ShellIntegrator();
-      await integrator.uninstall(options.shell);
-      console.log(chalk.green("✓ Shell integration removed successfully"));
-    } catch (error) {
-      console.error(chalk.red("Uninstallation failed:"), error instanceof Error ? error.message : String(error));
-    }
+  .option("--shell <shell>")
+  .action(async options => {
+    const integrator = new ShellIntegrator();
+    await integrator.uninstall(options.shell);
+    console.log(chalk.green("✓ Shell integration removed"));
   });
 
-program
-// Vault management commands
-program
-  .command("vault")
-  .description("Manage command vault");
-
-program
-  .command("vault:list")
-  .alias("vault")
-  .description("List all stored commands")
-  .action(async () => {
-    try {
-      const storage = new StorageManager();
-      const allCommands = await storage.getAllCommands();
-      console.table(allCommands.map(cmd => ({
-        id: cmd.id,
-        name: cmd.name || '',
-        commands: cmd.commands.join('; '),
-        description: cmd.description,
-        tags: cmd.tags.join(', '),
-        usageCount: cmd.usageCount,
-        source: cmd.source
-      })));
-    } catch (error) {
-      console.error(chalk.red("Error listing vault:"), error instanceof Error ? error.message : String(error));
-    }
-  });
-
-program
-  .command("vault:search")
-  .description("Search commands in vault")
-  .argument("<query>", "Search query")
-  .action(async (query) => {
-    try {
-      const storage = new StorageManager();
-      const results = await storage.searchCommands(query);
-      console.table(results.map(cmd => ({
-        id: cmd.id,
-        name: cmd.name || '',
-        commands: cmd.commands.join('; '),
-        description: cmd.description,
-        tags: cmd.tags.join(', '),
-        confidence: cmd.confidence
-      })));
-    } catch (error) {
-      console.error(chalk.red("Error searching vault:"), error instanceof Error ? error.message : String(error));
-    }
-  });
-
-program
-  .command("vault:add")
-  .description("Add a command to vault")
-  .option("-n, --name <name>", "Custom name for the command")
-  .option("-d, --description <description>", "Description for the command")
-  .argument("[command]", "Command or script to add")
-  .action(async (command, options) => {
-    // Manual parsing since commander.js has issues with options and arguments containing special chars
-    const args = process.argv.slice(3); // Skip 'node', 'dist/cli.js', 'vault:add'
-    
-    let name: string | undefined;
-    let description: string | undefined;
-    let cmd: string | undefined;
-    
-    // First argument is the command
-    cmd = args[0];
-    
-    // Parse options
-    for (let i = 1; i < args.length; i++) {
-      const arg = args[i];
-      if (arg === '-n' || arg === '--name') {
-        name = args[i + 1];
-        i++; // Skip next arg
-      } else if (arg === '-d' || arg === '--description') {
-        description = args[i + 1];
-        i++; // Skip next arg
-      }
-    }
-    try {
-      const storage = new StorageManager();
-      // Split on ; or && for multi-command scripts
-      const cmdArray = cmd.split(/\s*(&&|;)\s*/).filter((c: string) => c && !['&&', ';'].includes(c));
-      
-      // Extract variables from all commands
-      const variables: { [key: string]: string } = {};
-      const variableRegex = /\{([^}]+)\}/g;
-      const allCommands = cmdArray.length > 1 ? cmdArray : [cmd];
-      
-      allCommands.forEach((c: string) => {
-        let match;
-        while ((match = variableRegex.exec(c)) !== null) {
-          const varName = match[1];
-          variables[varName] = ""; // Empty description for now
-        }
-      });
-      
-      await storage.addCommand(
-        cmdArray.length > 1 ? cmdArray : cmd,
-        description,
-        [],
-        'user',
-        0.7,
-        Object.keys(variables).length > 0 ? variables : undefined,
-        name
-      );
-      console.log(chalk.green(cmdArray.length > 1 ? "✓ Script added to vault" : "✓ Command added to vault"));
-      if (Object.keys(variables).length > 0) {
-        console.log(chalk.blue(`Variables detected: ${Object.keys(variables).join(', ')}`));
-      }
-    } catch (error) {
-      console.error(chalk.red("Error adding command:"), error instanceof Error ? error.message : String(error));
-    }
-  });
+/* ---------------------------------------------------- */
+/* COMMAND: vault run                                   */
+/* ---------------------------------------------------- */
 
 program
   .command("vault:run")
-  .description("Run a stored command by ID or name")
-  .argument("<idOrName>", "Command ID or custom name")
-  .action(async (idOrName) => {
-    try {
-      const storage = new StorageManager();
-      const allCmds = await storage.getAllCommands();
-      let cmdToRun = allCmds.find(cmd => cmd.id === idOrName);
-      
-      // If not found by ID, try to find by name
-      if (!cmdToRun) {
-        cmdToRun = allCmds.find(cmd => cmd.name === idOrName);
-      }
-      
-      if (!cmdToRun) {
-        console.log(chalk.red(`Command with ID or name '${idOrName}' not found`));
-        return;
-      }
-      
-      // Increment usage
-      await storage.incrementUsage(cmdToRun.id);
-      
-      // Execute the command like in suggest
-      const resolvedCommand: ResolvedCommand = {
-        commands: cmdToRun.commands,
-        explanation: cmdToRun.description,
-        tags: cmdToRun.tags,
-        confidence: cmdToRun.confidence,
-        source: cmdToRun.source as any,
-        variables: cmdToRun.variables
-      };
+  .argument("<idOrName>")
+  .action(async idOrName => {
+    const ctx = await createContext();
+    const all = await ctx.storage.getAllCommands();
 
-      const validator = new SafetyValidator();
-      const osAdapter = new OSAdapter();
-      const pluginManager = new PluginManager();
-      await pluginManager.loadPlugins();
+    const cmd =
+      all.find(c => c.id === idOrName) ||
+      all.find(c => c.name === idOrName);
 
-      const safetyResult = await validator.validate(resolvedCommand);
-
-      if (safetyResult.warning) {
-        console.log(
-          chalk.yellow("⚠️  SAFETY WARNING: ") + safetyResult.warning,
-        );
-      }
-
-      // Handle variables
-      let finalCommands = [...resolvedCommand.commands];
-      if (resolvedCommand.variables) {
-        const inquirer = require("inquirer");
-        const variablePrompts = Object.keys(resolvedCommand.variables).map(varName => ({
-          type: "input",
-          name: varName,
-          message: `Enter value for ${varName}:`,
-        }));
-        const answers = await inquirer.prompt(variablePrompts);
-        finalCommands = finalCommands.map(cmd => {
-          let substituted = cmd;
-          for (const [varName, value] of Object.entries(answers)) {
-            substituted = substituted.replace(new RegExp(`\\{${varName}\\}`, 'g'), value as string);
-          }
-          return substituted;
-        });
-      }
-
-      console.log(chalk.green("Running script:"));
-      finalCommands.forEach((cmd, index) => {
-        console.log(`${index + 1}. ${chalk.cyan(cmd)}`);
-      });
-
-      if (finalCommands.length === 1) {
-        // Single command - ask for confirmation
-        const inquirer = require("inquirer");
-        const { confirmed } = await inquirer.prompt([{
-          type: "confirm",
-          name: "confirmed",
-          message: "Execute this command?",
-          default: false
-        }]);
-
-        if (!confirmed) {
-          console.log(chalk.yellow("Command execution cancelled."));
-          return;
-        }
-
-        // Execute single command
-        const { exec } = require("child_process");
-        const child = exec(finalCommands[0], { cwd: process.cwd() });
-
-        child.stdout?.on("data", (data: Buffer) => {
-          process.stdout.write(data);
-        });
-
-        child.stderr?.on("data", (data: Buffer) => {
-          process.stderr.write(data);
-        });
-
-        await new Promise((resolve, reject) => {
-          child.on("close", (code: number) => {
-            if (code === 0) {
-              resolve(void 0);
-            } else {
-              reject(new Error(`Command failed with exit code ${code}`));
-            }
-          });
-          child.on("error", reject);
-        });
-      } else {
-        // Multi-command script - ask for each step
-        const inquirer = require("inquirer");
-        const { exec } = require("child_process");
-
-        for (let i = 0; i < finalCommands.length; i++) {
-          const cmd = finalCommands[i];
-          console.log(chalk.blue(`\nStep ${i + 1}: ${chalk.cyan(cmd)}`));
-          
-          const { confirmed } = await inquirer.prompt([{
-            type: "confirm",
-            name: "confirmed",
-            message: `Execute step ${i + 1}?`,
-            default: false
-          }]);
-
-          if (!confirmed) {
-            console.log(chalk.yellow(`Step ${i + 1} skipped.`));
-            continue;
-          }
-
-          const child = exec(cmd, { cwd: process.cwd() });
-
-          child.stdout?.on("data", (data: Buffer) => {
-            process.stdout.write(data);
-          });
-
-          child.stderr?.on("data", (data: Buffer) => {
-            process.stderr.write(data);
-          });
-
-          await new Promise((resolve, reject) => {
-            child.on("close", (code: number) => {
-              if (code === 0) {
-                resolve(void 0);
-              } else {
-                reject(new Error(`Step ${i + 1} failed with exit code ${code}`));
-              }
-            });
-            child.on("error", reject);
-          });
-        }
-      }
-    } catch (error) {
-      console.error(chalk.red("Error running command:"), error instanceof Error ? error.message : String(error));
+    if (!cmd) {
+      console.log(chalk.red("Command not found in vault."));
+      return;
     }
+
+    await ctx.storage.incrementUsage(cmd.id);
+
+    const resolved: ResolvedCommand = {
+      commands: cmd.commands,
+      explanation: cmd.description,
+      tags: cmd.tags,
+      confidence: cmd.confidence,
+      source: "vault",
+      variables: cmd.variables,
+    };
+
+    await executeResolvedCommand(resolved, ctx.validator);
   });
+
+/* ---------------------------------------------------- */
+/* DEBUG                                                */
+/* ---------------------------------------------------- */
 
 program
   .command("debug")
-  .description("Show debugging information")
   .action(() => {
     const osAdapter = new OSAdapter();
-    console.log(chalk.blue("Debug Information:"));
+    console.log(chalk.blue("Debug Info"));
     console.log("OS:", osAdapter.getOS());
-    console.log("Shell:", process.env.SHELL || "Unknown");
-    console.log("Node Version:", process.version);
-    console.log("Working Directory:", process.cwd());
+    console.log("Node:", process.version);
+    console.log("CWD:", process.cwd());
   });
+
+/* ---------------------------------------------------- */
 
 async function main() {
   await program.parseAsync(process.argv);
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
+main().catch(err => {
+  console.error(chalk.red("Fatal error:"), err);
   process.exit(1);
 });

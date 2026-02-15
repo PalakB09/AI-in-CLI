@@ -28,28 +28,28 @@ export class OSAdapter {
         detectedPlatform = 'linux';
         break;
       default:
-        detectedPlatform = 'linux'; // Default fallback
+        detectedPlatform = 'linux';
     }
 
     return {
       platform: detectedPlatform,
       arch: os.arch(),
-      shell: this.detectShell()
+      shell: this.detectShell(),
     };
   }
 
   private detectShell(): string {
-  if (process.platform === 'win32') {
-    return process.env.COMSPEC || 'cmd.exe';
+    if (process.platform === 'win32') {
+      return process.env.COMSPEC || 'cmd.exe';
+    }
+    return process.env.SHELL || 'bash';
   }
-  return process.env.SHELL || 'bash';
-}
 
   isCommandAvailable(command: string): boolean {
     try {
       which.sync(command);
       return true;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
@@ -57,103 +57,89 @@ export class OSAdapter {
   getAlternativeCommands(primaryCommand: string): string[] {
     const alternatives: Record<string, Record<string, string[]>> = {
       windows: {
-        'ls': ['dir'],
-        'cat': ['type'],
-        'cp': ['copy'],
-        'mv': ['move', 'ren'],
-        'rm': ['del', 'rmdir'],
-        'clear': ['cls'],
-        'grep': ['findstr'],
-        'ps': ['tasklist'],
-        'kill': ['taskkill'],
-        'ifconfig': ['ipconfig'],
-        'ping': ['ping'],
-        'mkdir': ['mkdir'],
-        'chmod': ['icacls', 'attrib'],
-        'tar': ['tar'],
-        'ssh': ['ssh'],
-        'scp': ['scp'],
-        'wget': ['curl', 'bitsadmin'],
-        'curl': ['curl', 'Invoke-WebRequest'],
-        'nano': ['notepad'],
-        'vim': ['notepad']
+        ls: ['dir'],
+        cat: ['type'],
+        cp: ['copy'],
+        mv: ['move', 'ren'],
+        rm: ['del', 'rmdir'],
+        clear: ['cls'],
+        grep: ['findstr'],
+        ps: ['tasklist'],
+        kill: ['taskkill'],
+        ifconfig: ['ipconfig'],
+        mkdir: ['mkdir'],
+        chmod: ['icacls'],
+        wget: ['curl', 'bitsadmin'],
+        nano: ['notepad'],
+        vim: ['notepad'],
       },
       linux: {
-        'dir': ['ls'],
-        'type': ['cat'],
-        'copy': ['cp'],
-        'move': ['mv'],
-        'del': ['rm'],
-        'rmdir': ['rm -rf'],
-        'cls': ['clear'],
-        'findstr': ['grep'],
-        'tasklist': ['ps'],
-        'taskkill': ['kill'],
-        'ipconfig': ['ifconfig', 'ip addr'],
-        'notepad': ['nano', 'vim'],
-        'attrib': ['chmod']
+        dir: ['ls'],
+        type: ['cat'],
+        copy: ['cp'],
+        move: ['mv'],
+        del: ['rm'],
+        cls: ['clear'],
+        findstr: ['grep'],
+        tasklist: ['ps'],
+        taskkill: ['kill'],
+        ipconfig: ['ifconfig', 'ip addr'],
+        notepad: ['nano', 'vim'],
+        attrib: ['chmod'],
       },
       macos: {
-        'dir': ['ls'],
-        'type': ['cat'],
-        'copy': ['cp'],
-        'move': ['mv'],
-        'del': ['rm'],
-        'rmdir': ['rm -rf'],
-        'cls': ['clear'],
-        'findstr': ['grep'],
-        'tasklist': ['ps'],
-        'taskkill': ['kill'],
-        'ipconfig': ['ifconfig', 'ip addr'],
-        'notepad': ['nano', 'vim', 'open -e'],
-        'attrib': ['chmod']
-      }
+        dir: ['ls'],
+        type: ['cat'],
+        copy: ['cp'],
+        move: ['mv'],
+        del: ['rm'],
+        cls: ['clear'],
+        findstr: ['grep'],
+        tasklist: ['ps'],
+        taskkill: ['kill'],
+        ipconfig: ['ifconfig', 'ip addr'],
+        notepad: ['nano', 'vim', 'open -e'],
+        attrib: ['chmod'],
+      },
     };
 
-    const platform = this.currentOS.platform;
-    const platformAlternatives = alternatives[platform];
-    return platformAlternatives?.[primaryCommand] || [];
+    return alternatives[this.currentOS.platform]?.[primaryCommand] || [];
   }
 
   normalizeCommand(command: string): string {
     const normalized = command.trim();
-    
-    if (this.currentOS.platform === 'windows') {
-      return this.normalizeWindowsCommand(normalized);
-    } else {
-      return this.normalizeUnixCommand(normalized);
-    }
+    return this.currentOS.platform === 'windows'
+      ? this.normalizeWindowsCommand(normalized)
+      : this.normalizeUnixCommand(normalized);
   }
 
   private normalizeWindowsCommand(command: string): string {
-    // Convert Unix-style paths to Windows
-    let normalized = command.replace(/\//g, '\\');
-    
-    // Replace common Unix commands with Windows equivalents
+    // Do NOT touch URLs
+    let normalized = command.replace(
+      /(?<!https?):\/(?!\/)/g,
+      '\\'
+    );
+
     const replacements: Record<string, string> = {
       'ls -la': 'dir',
       'ls -l': 'dir',
-      'ls': 'dir',
-      'cat': 'type',
+      ls: 'dir',
+      cat: 'type',
       'cp -r': 'xcopy /E /I',
-      'cp': 'copy',
-      'mv': 'move',
-      'rm -rf': 'rmdir /S /Q',
-      'rm': 'del',
-      'clear': 'cls',
-      'grep': 'findstr',
+      cp: 'copy',
+      mv: 'move',
+      rm: 'del',
+      clear: 'cls',
+      grep: 'findstr',
       'ps aux': 'tasklist',
-      'kill': 'taskkill',
-      'chmod +x': 'icacls', // Different semantics, but closest equivalent
-      'tar -xvf': 'tar -xvf', // tar is available on Windows 10+
-      'wget': 'curl -O',
-      'curl -O': 'curl -O',
-      'nano': 'notepad'
+      kill: 'taskkill',
+      nano: 'notepad',
     };
 
-    for (const [unix, windows] of Object.entries(replacements)) {
-      if (normalized.startsWith(unix + ' ') || normalized === unix) {
-        normalized = normalized.replace(unix, windows);
+    for (const key of Object.keys(replacements).sort((a, b) => b.length - a.length)) {
+      if (normalized === key || normalized.startsWith(key + ' ')) {
+        normalized = normalized.replace(key, replacements[key]);
+        break;
       }
     }
 
@@ -161,30 +147,27 @@ export class OSAdapter {
   }
 
   private normalizeUnixCommand(command: string): string {
-    // Windows-style paths to Unix
     let normalized = command.replace(/\\/g, '/');
-    
-    // Replace Windows commands with Unix equivalents
+
     const replacements: Record<string, string> = {
-      'dir': 'ls -la',
-      'type': 'cat',
-      'copy': 'cp',
-      'move': 'mv',
-      'del': 'rm',
-      'rmdir /S /Q': 'rm -rf',
-      'rmdir': 'rm -rf',
-      'cls': 'clear',
-      'findstr': 'grep',
-      'tasklist': 'ps aux',
-      'taskkill': 'kill',
-      'icacls': 'chmod',
-      'attrib': 'chmod',
-      'notepad': 'nano'
+      dir: 'ls -la',
+      type: 'cat',
+      copy: 'cp',
+      move: 'mv',
+      del: 'rm',
+      cls: 'clear',
+      findstr: 'grep',
+      tasklist: 'ps aux',
+      taskkill: 'kill',
+      icacls: 'chmod',
+      attrib: 'chmod',
+      notepad: 'nano',
     };
 
-    for (const [windows, unix] of Object.entries(replacements)) {
-      if (normalized.startsWith(windows + ' ') || normalized === windows) {
-        normalized = normalized.replace(windows, unix);
+    for (const key of Object.keys(replacements).sort((a, b) => b.length - a.length)) {
+      if (normalized === key || normalized.startsWith(key + ' ')) {
+        normalized = normalized.replace(key, replacements[key]);
+        break;
       }
     }
 
@@ -212,7 +195,7 @@ export class OSAdapter {
   }
 
   supportsSymlinks(): boolean {
-    return this.currentOS.platform !== 'windows';
+    return this.currentOS.platform !== 'windows' || !!process.env.USERNAME;
   }
 
   supportsPermissions(): boolean {
@@ -237,7 +220,7 @@ export class OSAdapter {
       arch: os.arch(),
       hostname: os.hostname(),
       homedir: os.homedir(),
-      shell: this.currentOS.shell || 'unknown'
+      shell: this.currentOS.shell || 'unknown',
     };
   }
 }

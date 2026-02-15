@@ -4,6 +4,8 @@ import * as path from "path";
 import * as os from "os";
 import { CacheManager } from "../cache/cache-manager";
 
+const PROMPT_VERSION = "v1";
+
 export class AIService {
   private configPath: string;
   private cache: CacheManager;
@@ -15,33 +17,44 @@ export class AIService {
 
   async generateCommand(
     input: string,
-    osInfo: OS
+    osInfo: OS,
+    learningMode: boolean = false
   ): Promise<ResolvedCommand | null> {
     try {
-      // Check cache first
-      const cachedResponse = await this.cache.get(input, osInfo);
+      const wantsMultiple =
+        /\bthen\b|\band\b|\bafter that\b|\bfollowed by\b/i.test(input);
+
+      const cachedResponse = await this.cache.get(
+        input,
+        osInfo,
+        learningMode
+      );
+
       if (cachedResponse) {
-        console.log('[CACHE HIT]');
-        const parsed = this.parseAIResponse(cachedResponse, /\bthen\b|\band\b|\bafter that\b|\bfollowed by\b/i.test(input));
-        return parsed;
+        console.log("[CACHE HIT]");
+        return this.parseAIResponse(
+          cachedResponse,
+          wantsMultiple,
+          learningMode
+        );
       }
 
       const provider = await this.getAvailableProvider();
       if (!provider) return null;
 
-      const wantsMultiple =
-        /\bthen\b|\band\b|\bafter that\b|\bfollowed by\b/i.test(input);
+      const prompt = this.buildPrompt(
+        input,
+        osInfo,
+        wantsMultiple,
+        learningMode
+      );
 
-      const prompt = this.buildPrompt(input, osInfo, wantsMultiple);
       const response = await this.callAI(provider, prompt);
-
       if (!response) return null;
 
-      // Cache the response
-      await this.cache.set(input, osInfo, response);
+      await this.cache.set(input, osInfo, learningMode, response);
 
-      const parsed = this.parseAIResponse(response, wantsMultiple);
-      return parsed;
+      return this.parseAIResponse(response, wantsMultiple, learningMode);
     } catch (error: any) {
       console.error("AI service error:", error.message);
       return null;
@@ -82,7 +95,8 @@ export class AIService {
   private buildPrompt(
     input: string,
     osInfo: OS,
-    wantsMultiple: boolean
+    wantsMultiple: boolean,
+    learningMode: boolean = false
   ): string {
     const osContext =
       osInfo.platform === "windows"
@@ -94,6 +108,25 @@ export class AIService {
     const chainingRule = wantsMultiple
       ? "- You MUST combine ALL steps into ONE command using && or ;"
       : "- Return the single most appropriate command";
+
+    const learningInstructions = learningMode
+      ? `
+LEARNING MODE ENABLED.
+
+After the command, output:
+_JSON_
+<VALID JSON>
+
+JSON schema:
+{
+  "concepts": [],
+  "debuggingSteps": [],
+  "relatedCommands": [],
+  "bestPractices": [],
+  "resources": []
+}
+`
+      : "";
 
     return `
 You are a shell command generator.
@@ -107,16 +140,15 @@ ${osContext}
 STRICT RULES:
 - Output ONLY a valid shell command
 - NO explanations
-- NO greetings
 - NO markdown
 - NO quotes
-- NO placeholders like command1
 - NO sentences
-- Use {variableName} for user inputs (e.g., git commit -m "{message}")
+- NO placeholders like command1
+- Use {variableName} for user inputs
 ${chainingRule}
-- Prefer PowerShell-safe syntax on Windows
+${learningInstructions}
 
-If there are 2 or more commands to achieve the user's goal, you MUST combine them into a single line using && or ;. If you cannot determine a clear command, return only one command.
+If unsure, return the safest possible command.
 `.trim();
   }
 
@@ -157,8 +189,19 @@ If there are 2 or more commands to achieve the user's goal, you MUST combine the
         );
       }
 
-      const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-      return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? null;
+      const data = (await response.json()) as {
+        candidates?: Array<{
+          content?: { parts?: Array<{ text?: string }> };
+        }>;
+      };
+
+      const text =
+        data.candidates?.[0]?.content?.parts
+          ?.map(p => p.text ?? "")
+          .join("")
+          .trim() ?? null;
+
+      return text;
     } catch (error: any) {
       console.error("Gemini API call failed:", error.message);
       return null;
@@ -171,75 +214,75 @@ If there are 2 or more commands to achieve the user's goal, you MUST combine the
 
   private parseAIResponse(
     response: string,
-    wantsMultiple: boolean
+    wantsMultiple: boolean,
+    learningMode: boolean = false
   ): ResolvedCommand | null {
     const raw = response.trim();
 
-    // Remove code fences / markdown
-    const cleaned = raw
+    let commandPart = raw;
+    let learningPart: string | null = null;
+
+    if (learningMode && raw.includes("_JSON_")) {
+      const parts = raw.split("_JSON_");
+      commandPart = parts[0].trim();
+      learningPart = parts[1]?.trim() ?? null;
+    }
+
+    const cleaned = commandPart
       .replace(/```[\s\S]*?```/g, "")
       .replace(/`/g, "")
       .split("\n")[0]
       .trim();
 
-    /* ---------------- HARD REJECTIONS ---------------- */
-
-    if (
-      !cleaned ||
-      cleaned.length > 180 ||
-      cleaned.includes("command1") ||
-      cleaned.includes("command2") ||
-      cleaned.endsWith("?") ||
-      cleaned.toLowerCase().includes("help") ||
-      cleaned.toLowerCase().includes("ready")
-    ) {
+    if (!cleaned || cleaned.length > 180 || cleaned.endsWith("?")) {
       return null;
     }
 
-    // If multiple steps were requested or separators are present, enforce chaining
-    let hasSeparators = /[;&|]{1,2}/.test(cleaned);
-    if (wantsMultiple || hasSeparators) {
-      if (!hasSeparators) {
-        return null; // Wants multiple but no separators
-      }
+    const hasSeparators = /\s(&&|;)\s/.test(cleaned);
+
+    if (wantsMultiple && !hasSeparators) {
+      return null;
     }
 
-    /* ---------------- SPLIT INTO STEPS ---------------- */
-
-    let commands: string[];
-    if (hasSeparators) {
-      // Split on && or ; or |
-      commands = cleaned.split(/\s*(&&|;|\|)\s*/).filter(cmd => cmd && !['&&', ';', '|'].includes(cmd));
-    } else {
-      commands = [cleaned];
-    }
-
-    /* ---------------- DETECT VARIABLES ---------------- */
+    const commands = hasSeparators
+      ? cleaned.split(/\s*(?:&&|;)\s*/)
+      : [cleaned];
 
     const variables: { [key: string]: string } = {};
     const varRegex = /\{(\w+)\}/g;
+
     commands.forEach(cmd => {
       let match;
       while ((match = varRegex.exec(cmd)) !== null) {
-        variables[match[1]] = ''; // Placeholder, will be filled later
+        variables[match[1]] = "";
       }
     });
 
-    /* ---------------- ACCEPT ---------------- */
+    let learningContent = undefined;
+    if (learningMode && learningPart) {
+      try {
+        learningContent = JSON.parse(learningPart);
+      } catch {
+        /* ignore */
+      }
+    }
 
     return {
       commands,
       explanation: "Command suggested by AI",
       tags: ["ai"],
-      confidence: wantsMultiple ? 0.75 : 0.6,
+      confidence: 0.7,
       source: "ai",
-      variables: Object.keys(variables).length > 0 ? variables : undefined,
+      variables: Object.keys(variables).length ? variables : undefined,
+      ...learningContent,
     };
   }
 
   /* ------------------------------------------------------------------ */
 
   isConfigured(): boolean {
-    return !!(process.env.GEMINI_API_KEY || fs.pathExistsSync(this.configPath));
+    return !!(
+      process.env.GEMINI_API_KEY || fs.pathExistsSync(this.configPath)
+    );
   }
 }

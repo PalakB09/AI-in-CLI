@@ -7,13 +7,15 @@ import { exec } from 'child_process';
 
 const execAsync = promisify(exec);
 
+const START_MARKER = '# AI CLI Assistant Integration START';
+const END_MARKER = '# AI CLI Assistant Integration END';
+
 export class ShellIntegrator {
   private readonly homeDir = os.homedir();
-  private readonly configDir = path.join(this.homeDir, '.ai-cli');
 
   async install(shellType?: string): Promise<void> {
     const shell = shellType || await this.detectCurrentShell();
-    
+
     switch (shell) {
       case 'bash':
         await this.installBash();
@@ -32,172 +34,132 @@ export class ShellIntegrator {
     }
   }
 
-  async uninstall(shellType?: string): Promise<void> {
-    const shell = shellType || await this.detectCurrentShell();
-    
-    switch (shell) {
-      case 'bash':
-        await this.uninstallBash();
-        break;
-      case 'zsh':
-        await this.uninstallZsh();
-        break;
-      case 'powershell':
-        await this.uninstallPowerShell();
-        break;
-      default:
-        throw new Error(`Unsupported shell: ${shell}`);
-    }
-  }
+  // async uninstall(shellType?: string): Promise<void> {
+  //   const shell = shellType || await this.detectCurrentShell();
+
+  //   switch (shell) {
+  //     case 'bash':
+  //       await this.uninstall(path.join(this.homeDir, '.bashrc'));
+  //       break;
+  //     case 'zsh':
+  //       await this.uninstall(path.join(this.homeDir, '.zshrc'));
+  //       break;
+  //     case 'powershell':
+  //       await this.uninstall(await this.getPowerShellProfilePath());
+  //       break;
+  //     default:
+  //       throw new Error(`Unsupported shell: ${shell}`);
+  //   }
+  // }
 
   private async detectCurrentShell(): Promise<string> {
-    if (process.platform === 'win32') {
-      return 'powershell';
-    }
-    
+    if (process.platform === 'win32') return 'powershell';
+
     try {
       const { stdout } = await execAsync('echo $SHELL');
-      const shellPath = stdout.trim();
-      if (shellPath.includes('bash')) return 'bash';
-      if (shellPath.includes('zsh')) return 'zsh';
-    } catch (error) {
-      console.log(chalk.yellow('Could not detect shell, defaulting to bash'));
-    }
-    
+      if (stdout.includes('zsh')) return 'zsh';
+      if (stdout.includes('bash')) return 'bash';
+    } catch {}
+
     return 'bash';
   }
 
+  /* -------------------- INSTALLERS -------------------- */
+
   private async installBash(): Promise<void> {
-    const bashrcPath = path.join(this.homeDir, '.bashrc');
-    const hookScript = `
-# AI CLI Assistant Integration
+    const bashrc = path.join(this.homeDir, '.bashrc');
+    const script = `
+${START_MARKER}
 ai_suggest_missing_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     ai suggest "$*" --explain
     return 127
   fi
 }
-
-preexec_functions+=(_ai_command_interceptor)
+${END_MARKER}
 `;
-
-    await this.appendToFile(bashrcPath, hookScript);
+    await this.appendBlock(bashrc, script);
     console.log(chalk.green('✓ Bash integration installed'));
   }
 
   private async installZsh(): Promise<void> {
-    const zshrcPath = path.join(this.homeDir, '.zshrc');
-    const hookScript = `
-# AI CLI Assistant Integration
-_ai_zle_widget() {
-    local current_command="\$LBUFFER"
-    if [[ "\$current_command" != *"ai suggest"* ]] && ! command -v "\${current_command%% *}" &>/dev/null && [[ -n "\$current_command" ]]; then
-        zle -M "Getting AI suggestion..."
-        local suggestion=\$(ai suggest "\$current_command" 2>/dev/null | head -n 1)
-        if [[ -n "\$suggestion" ]]; then
-            LBUFFER="\$suggestion"
-        fi
-    fi
-    zle reset-prompt
+    const zshrc = path.join(this.homeDir, '.zshrc');
+    const script = `
+${START_MARKER}
+_ai_suggest_widget() {
+  zle -M "Press Enter to get AI suggestion"
 }
-zle -N _ai_zle_widget
-bindkey '^T' _ai_zle_widget
+zle -N _ai_suggest_widget
+bindkey '^T' _ai_suggest_widget
+${END_MARKER}
 `;
-
-    await this.appendToFile(zshrcPath, hookScript);
+    await this.appendBlock(zshrc, script);
     console.log(chalk.green('✓ Zsh integration installed'));
   }
 
   private async installPowerShell(): Promise<void> {
     const profilePath = await this.getPowerShellProfilePath();
-    const hookScript = `
-# AI CLI Assistant Integration
-$script:AI_OriginalPSReadLineHandler = $null
-
+    const script = `
+${START_MARKER}
 function Invoke-AICommandSuggestion {
-    param([string]$CommandLine)
-    
-    if ($CommandLine -like "*ai suggest*") { return }
-    
-    $firstCommand = ($CommandLine -split ' ')[0]
-    if (-not (Get-Command $firstCommand -ErrorAction SilentlyContinue)) {
-        Write-Host "Command not found. Getting AI suggestion..." -ForegroundColor Yellow
-        $suggestion = ai suggest $CommandLine --explain
-        Write-Host $suggestion -ForegroundColor Cyan
-    }
+  param([string]$CommandLine)
+  ai suggest -- "$CommandLine" --explain
 }
 
-Set-PSReadLineKeyHandler -Key "Ctrl+t" -BriefDescription "AI Suggest" -ScriptBlock {
-    param($key, $arg)
-    $line = $null
-    $cursor = $null
-    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
-    Invoke-AICommandSuggestion -CommandLine $line
+Set-PSReadLineKeyHandler -Key "Ctrl+t" -ScriptBlock {
+  param($key, $arg)
+  $line = $null
+  $cursor = $null
+  [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+  Invoke-AICommandSuggestion -CommandLine $line
 }
+${END_MARKER}
 `;
-
-    await this.appendToFile(profilePath, hookScript);
+    await this.appendBlock(profilePath, script);
     console.log(chalk.green('✓ PowerShell integration installed'));
   }
 
-  private async uninstallBash(): Promise<void> {
-    const bashrcPath = path.join(this.homeDir, '.bashrc');
-    await this.removeFromFile(bashrcPath, '# AI CLI Assistant Integration');
+  /* -------------------- UNINSTALL -------------------- */
+
+   async uninstall(filePath: string): Promise<void> {
+    if (!(await fs.pathExists(filePath))) return;
+
+    const content = await fs.readFile(filePath, 'utf8');
+    const start = content.indexOf(START_MARKER);
+    const end = content.indexOf(END_MARKER);
+
+    if (start === -1 || end === -1) return;
+
+    const updated =
+      content.slice(0, start) +
+      content.slice(end + END_MARKER.length);
+
+    await fs.writeFile(filePath, updated);
   }
 
-  private async uninstallZsh(): Promise<void> {
-    const zshrcPath = path.join(this.homeDir, '.zshrc');
-    await this.removeFromFile(zshrcPath, '# AI CLI Assistant Integration');
-  }
-
-  private async uninstallPowerShell(): Promise<void> {
-    const profilePath = await this.getPowerShellProfilePath();
-    await this.removeFromFile(profilePath, '# AI CLI Assistant Integration');
-  }
+  /* -------------------- HELPERS -------------------- */
 
   private async getPowerShellProfilePath(): Promise<string> {
-    const { stdout } = await execAsync('powershell -Command "echo $PROFILE"');
+    const { stdout } = await execAsync(
+      'powershell -Command "echo $PROFILE"'
+    );
     return stdout.trim();
   }
 
-  private async appendToFile(filePath: string, content: string): Promise<void> {
+  private async appendBlock(filePath: string, block: string): Promise<void> {
     await fs.ensureFile(filePath);
-    const existingContent = await fs.readFile(filePath, 'utf8');
-    
-    if (!existingContent.includes('# AI CLI Assistant Integration')) {
-      await fs.appendFile(filePath, '\n' + content + '\n');
-    }
-  }
+    const content = await fs.readFile(filePath, 'utf8');
 
-  private async removeFromFile(filePath: string, marker: string): Promise<void> {
-    if (await fs.pathExists(filePath)) {
-      const content = await fs.readFile(filePath, 'utf8');
-      const lines = content.split('\n');
-      const filteredLines = [];
-      let skip = false;
-      
-      for (const line of lines) {
-        if (line.includes(marker)) {
-          skip = true;
-        } else if (skip && line.trim() === '') {
-          skip = false;
-          continue;
-        }
-        
-        if (!skip) {
-          filteredLines.push(line);
-        }
-      }
-      
-      await fs.writeFile(filePath, filteredLines.join('\n'));
-    }
+    if (content.includes(START_MARKER)) return;
+
+    await fs.appendFile(filePath, '\n' + block + '\n');
   }
 
   generateWrapperScript(): string {
     return `@echo off
 if "%1"=="" (
-    echo Usage: ai [suggest|install|uninstall|vault|debug] [args...]
-    exit /b 1
+  echo Usage: ai [suggest|install|uninstall|vault|debug]
+  exit /b 1
 )
 node "%~dp0..\\dist\\cli.js" %*
 `;
